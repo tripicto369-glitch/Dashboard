@@ -4,7 +4,9 @@ Each :class:`LibreOffice` instance starts its own ``soffice`` process with a
 unique socket port and a throw-away user profile, so several instances (or
 repeated test runs) never interfere.  Processes are started in their own
 process group and are killed on ``stop()``, on context-manager exit and at
-interpreter exit.
+interpreter exit (including Ctrl-C during startup and SIGTERM, which is turned
+into ``SystemExit`` unless the program installed its own handler).  Only a
+SIGKILL of the Python process can orphan soffice.
 
 Example::
 
@@ -31,6 +33,7 @@ import signal
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -110,6 +113,25 @@ def _kill_all() -> None:
             pass
 
 
+def _exit_on_sigterm(signum: int, _frame: Any) -> None:
+    raise SystemExit(128 + signum)
+
+
+def _install_sigterm_handler() -> None:
+    """Turn SIGTERM into ``SystemExit`` so the atexit cleanup above still runs.
+
+    Python's default SIGTERM action ends the process *without* running
+    atexit handlers, and soffice lives in its own session, so a test run
+    stopped by ``timeout``/CI cancellation would orphan soffice and its
+    profile.  Only installed from the main thread and only when nobody else
+    handles SIGTERM.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return
+    if signal.getsignal(signal.SIGTERM) is signal.SIG_DFL:
+        signal.signal(signal.SIGTERM, _exit_on_sigterm)
+
+
 class LibreOffice:
     """One headless ``soffice`` process reachable over a UNO socket."""
 
@@ -149,17 +171,27 @@ class LibreOffice:
     def start(self) -> "LibreOffice":
         if self.proc is not None:
             return self
+        _install_sigterm_handler()
+        # stop() removes the profile, so a restarted instance needs it again.
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        # Track the instance *before* spawning: an interrupt (Ctrl-C) while
+        # waiting for the socket must not leave soffice running.
+        _LIVE.add(self)
         last_error: Optional[Exception] = None
-        for _attempt in range(3):  # a port can be grabbed between probe and bind
-            self.port = _free_port()
-            try:
-                self._spawn_and_connect()
-                _LIVE.add(self)
-                self._configure()
-                return self
-            except LoError as exc:
-                last_error = exc
-                self._kill_process()
+        try:
+            for _attempt in range(3):  # a port can be grabbed between probe and bind
+                self.port = _free_port()
+                try:
+                    self._spawn_and_connect()
+                    self._configure()
+                    return self
+                except LoError as exc:
+                    last_error = exc
+                    self._kill_process()
+        except BaseException:
+            self.stop(graceful=False)  # any other failure: kill + drop profile
+            raise
+        self.stop(graceful=False)
         raise LoError(f"could not start LibreOffice: {last_error}")
 
     def _spawn_and_connect(self) -> None:

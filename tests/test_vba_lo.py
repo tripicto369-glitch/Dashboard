@@ -8,7 +8,9 @@ headless LibreOffice via UNO (``tests/lo_harness.py``) to prove that:
 * standard-module macros run and write cells (``WriteOk`` -> ``OK-П``);
 * functions return values, class modules instantiate, sheet code names resolve;
 * the ``ThisWorkbook`` document module is bound (``Workbook_Open`` fires);
-* the harness supports concurrent instances and PDF export.
+* the harness supports concurrent instances and PDF export, can restart a
+  stopped instance, and leaves no soffice/profile behind after SIGTERM or
+  Ctrl-C during startup.
 
 Run with ``python3 -I tests/test_vba_lo.py``.  When LibreOffice / ``uno`` is
 missing the test prints SKIP and exits 0, unless ``LHOS_REQUIRE_LO=1``.
@@ -20,8 +22,11 @@ import atexit
 import importlib.util
 import os
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from pathlib import Path
 
@@ -222,6 +227,90 @@ def test_harness_parallel_instances_and_pdf() -> None:
         other.stop()
     assert proc.poll() is not None, "soffice still running after stop()"
     assert not profile.exists(), "profile not removed"
+
+
+def _procs_using(profile: Path) -> list:
+    """PIDs whose command line mentions ``profile`` (independent of the harness)."""
+    needle = str(profile).encode()
+    pids = []
+    for entry in Path("/proc").iterdir():
+        if entry.name.isdigit() and int(entry.name) != os.getpid():
+            try:
+                if needle in (entry / "cmdline").read_bytes():
+                    pids.append(int(entry.name))
+            except OSError:
+                pass
+    return pids
+
+
+def _run_child(body: str, sig: int, delay: float, wait_for_up: bool) -> tuple:
+    """Run ``body`` in a child that owns a harness instance ``lo``, then signal it.
+
+    The child prints its profile dir first.  With ``wait_for_up`` the parent
+    also waits for a line printed by ``body`` (soffice is running); the
+    signal is sent ``delay`` seconds later.  Returns ``(returncode, profile)``
+    once no process refers to the profile any more (or after 10 s).
+    """
+    work = _env()["work"]
+    code = (
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(ROOT / 'tests')!r})\n"
+        "from lo_harness import LibreOffice\n"
+        f"lo = LibreOffice(base_dir={str(work)!r})\n"
+        "print(lo.profile_dir, flush=True)\n" + body
+    )
+    child = subprocess.Popen([sys.executable, "-I", "-c", code], stdout=subprocess.PIPE, text=True)
+    try:
+        profile = Path(child.stdout.readline().strip())
+        if wait_for_up:
+            child.stdout.readline()
+        time.sleep(delay)
+        child.send_signal(sig)
+        rc = child.wait(timeout=60)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    deadline = time.monotonic() + 10
+    while _procs_using(profile) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    return rc, profile
+
+
+def test_harness_cleans_up_on_sigterm() -> None:
+    body = "lo.start()\nprint('up', flush=True)\ntime.sleep(120)\n"
+    rc, profile = _run_child(body, signal.SIGTERM, 0.5, wait_for_up=True)
+    assert rc == 128 + signal.SIGTERM, rc
+    assert not _procs_using(profile), "soffice orphaned after SIGTERM"
+    assert not profile.exists(), "profile left after SIGTERM"
+
+
+def test_harness_cleans_up_on_interrupt_during_start() -> None:
+    # SIGINT 0.3 s after the child begins start(), i.e. while it still waits
+    # for the UNO socket (soffice needs well over a second to come up).
+    body = "try:\n    lo.start()\nexcept KeyboardInterrupt:\n    sys.exit(3)\ntime.sleep(120)\n"
+    rc, profile = _run_child(body, signal.SIGINT, 0.3, wait_for_up=False)
+    assert rc == 3, f"interrupt did not land inside start() (exit code {rc})"
+    assert not _procs_using(profile), "soffice orphaned after Ctrl-C during start()"
+    assert not profile.exists(), "profile left after Ctrl-C during start()"
+
+
+def test_harness_restart_after_stop() -> None:
+    from lo_harness import LibreOffice
+
+    lo = LibreOffice(base_dir=_env()["work"])
+    try:
+        lo.start()
+        lo.stop()
+        lo.start()  # profile was removed by stop(); start() must recreate it
+        doc = lo.open(_env()["xlsm"])
+        try:
+            assert doc.run_macro("modTest", "AddUp", (1, 2)) == 3.0
+        finally:
+            doc.close()
+    finally:
+        lo.stop()
+    assert not lo.profile_dir.exists()
 
 
 # ---------------------------------------------------------------------------

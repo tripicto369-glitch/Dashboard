@@ -107,9 +107,9 @@ def draw_header(cv: Canvas, assets: Assets) -> None:
            align="right", num="dd.mm.yyyy")
 
 
-def draw_nav(cv: Canvas, assets: Assets, active: int) -> None:
-    cv.fill((10, 92, 110, 948), C["nav"])
-    cv.frame((10, 92, 110, 948), C["border"])
+def draw_nav(cv: Canvas, assets: Assets, active: int, bottom: int = 948) -> None:
+    cv.fill((10, 92, 110, bottom), C["nav"])
+    cv.frame((10, 92, 110, bottom), C["border"])
     for k, (label, sheet, icon, _code) in enumerate(NAV):
         y0 = 100 + k * 90
         url = f"internal:{_q(sheet)}!A1"
@@ -416,8 +416,8 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     big = dict(bold=True, size=24, valign="bottom")
     unit = dict(size=11, color=C["text2"], valign="bottom")
     cv.put((426, 146, 622, 166), "МАКСИМАЛЬНОЕ ЗНАЧЕНИЕ", **klabel)
-    cv.put((426, 168, 512, 206), '=IF(c_MaxVal="","—",c_MaxVal)', align="right", num="0.0#", **big)
-    cv.put((512, 168, 600, 206), "ppm", indent=1, **unit)
+    cv.put((426, 168, 500, 206), '=IF(c_MaxVal="","—",c_MaxVal)', align="right", num="0.0#", **big)
+    cv.put((500, 168, 600, 206), "ppm", indent=1, **unit)
     cv.put((426, 208, 622, 230), "=c_MaxName", size=9, color=C["muted"])
     cv.vline(628, 150, 228, C["divider"])
     cv.put((642, 146, 806, 166), "СРЕДНЕЕ ЗНАЧЕНИЕ", **klabel)
@@ -432,7 +432,7 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
              (1058, 1166, "КРАСНАЯ ЗОНА", "=c_CntRed", C["red"])]
     for i, (x0, x1, t, frm, col) in enumerate(zones):
         cv.put((x0, 170, x1, 188), t, bold=True, size=8, color=col)
-        cv.put((x0, 190, x1, 230), frm, bold=True, size=24, color=col, num="0")
+        cv.put((x0, 190, x1, 230), frm, bold=True, size=24, color=col, num="0", align="left")
         if i:
             cv.vline(x0 - 6, 172, 228, C["line"])
     cv.vline(1172, 150, 228, C["divider"])
@@ -757,12 +757,12 @@ def build_placeholder(wb, ws, assets: Assets, active: int, title: str, text: str
     cv.frame(p, C["border"])
     cv.put((150, 110, 1360, 150), title, bold=True, size=14, color=C["text"])
     cv.hline(150, 1360, 150, C["divider"])
-    cv.image(722, 380, assets.icon(NAV[active][2] + "_normal"), scale=1.5)
+    cv.image(753 - 48, 380, assets.icon(NAV[active][2] + "_normal"), scale=1.5)
     cv.put((300, 490, 1206, 530), "Раздел в разработке", bold=True, size=16, color=C["text"],
            align="center")
     cv.put((300, 530, 1206, 600), text, size=10, color=C["muted"], align="center", wrap=True,
            valign="top")
-    cv.put((560, 620, 746, 652), "← К СВОДКЕ", bold=True, size=9.5, color=C["green"],
+    cv.put((660, 620, 846, 652), "← К СВОДКЕ", bold=True, size=9.5, color=C["green"],
            align="center", url=f"internal:{_q(S_DASH)}!A1", url_tip="Перейти на сводку")
     cv.build()
     ws.hide_gridlines(2)
@@ -779,7 +779,7 @@ def build_settings(wb, ws, assets: Assets) -> None:
     h = 548 + 34 + 30 + LOG_ROWS * 22 + 24
     cv = Canvas(wb, ws, W, h)
     draw_header(cv, assets)
-    draw_nav(cv, assets, active=5)
+    draw_nav(cv, assets, active=5, bottom=h - 12)
 
     lab = dict(size=9.5, color=C["text2"])
     inp = dict(size=10.5, bold=True, color=C["text"], bg=C["input"], align="center", locked=False)
@@ -819,7 +819,7 @@ def build_settings(wb, ws, assets: Assets) -> None:
         cv.put((726, y, 900, y + 30), t, **lab)
         cv.frame((900, y + 2, 1366, y + 28), C["divider"])
         cv.put((900, y + 2, 1366, y + 28), v, name=name, indent=1,
-               **{**inp, "align": "left", "size": 9.5})
+               **{**inp, "align": "left", "size": 9.5, "shrink": True})
 
     p = (126, 352, 1380, 536)
     cv.fill(p, C["panel"])
@@ -831,9 +831,10 @@ def build_settings(wb, ws, assets: Assets) -> None:
         ("Режим загрузки", None, "sys_LastMode", "@"),
         ("Объектов в базе", "=COUNTA(db_Names)", None, "0"),
         ("Значений в базе", "=COUNT(db_Vals)", None, "#,##0"),
-        ("Период данных", '=IF(c_FirstDate="","—",DAY(c_FirstDate)&"."&RIGHT("0"&MONTH(c_FirstDate),2)'
-                          '&"."&YEAR(c_FirstDate)&" – "&DAY(c_LastDate)&"."&RIGHT("0"&MONTH(c_LastDate),2)'
-                          '&"."&YEAR(c_LastDate))', None, "@"),
+        ("Период данных", '=IF(c_FirstDate="","—",RIGHT("0"&DAY(c_FirstDate),2)&"."&'
+                          'RIGHT("0"&MONTH(c_FirstDate),2)&"."&YEAR(c_FirstDate)&" – "&'
+                          'RIGHT("0"&DAY(c_LastDate),2)&"."&RIGHT("0"&MONTH(c_LastDate),2)&"."&'
+                          'YEAR(c_LastDate))', None, "@"),
     ]
     for i, (t, frm, name, num) in enumerate(info):
         col, row = divmod(i, 3)
@@ -842,7 +843,7 @@ def build_settings(wb, ws, assets: Assets) -> None:
         cv.put((x, y, x + 170, y + 28), t, size=9, color=C["muted"])
         extra = {"name": name} if name else {}
         cv.put((x + 170, y, x + 430, y + 28), frm, num=num, bold=True, size=9.5,
-               color=C["text"], **extra)
+               color=C["text"], align="left", **extra)
     button(cv, 1182, 398, assets.button("import"), "ImportData")
     button(cv, 1182, 444, assets.button("clear"), "ClearDatabase")
     cv.put((140, 490, 1366, 530),
@@ -880,6 +881,11 @@ def build_settings(wb, ws, assets: Assets) -> None:
     ws.hide_gridlines(2)
     ws.hide_row_col_headers()
     ws.set_zoom(85)
+    ws.set_landscape()
+    ws.set_paper(9)
+    ws.set_margins(left=0.2, right=0.2, top=0.2, bottom=0.2)
+    ws.print_area(0, 0, cv.n_rows - 1, cv.n_cols - 1)
+    ws.fit_to_pages(1, 0)
     ws.set_column(cv.n_cols, 16383, 9, cv.fmt({"bg": C["page"]}))
 
 

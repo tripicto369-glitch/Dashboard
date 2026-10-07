@@ -287,7 +287,7 @@ Private Function ParseSheet(ByVal ws As Worksheet, ByRef nVals As Long) As Boole
     ReDim objMap(1 To nc)
     For c = 2 To nc
         nm = CleanText(hdrNames(1, c))
-        If Len(nm) > 0 Then
+        If Len(nm) > 0 And Not IsServiceHeader(nm) Then
             grp = ""
             If groupRow > 0 Then
                 grp = CleanText(ws.Cells(groupRow, dateCol + c - 1).MergeArea.Cells(1, 1).Value)
@@ -312,6 +312,15 @@ Private Function ParseSheet(ByVal ws As Worksheet, ByRef nVals As Long) As Boole
             Next c
         End If
     Next r
+End Function
+
+' Итоговые и служебные столбцы рядом с данными («Среднее», «Итого» …) — не объекты.
+Private Function IsServiceHeader(ByVal nm As String) As Boolean
+    Dim s As String
+    s = LCase$(nm)
+    IsServiceHeader = (s Like "среднее*" Or s Like "средн.*" Or s Like "итог*" Or _
+        s Like "всего*" Or s Like "сумма*" Or s Like "максимум*" Or s Like "минимум*" Or _
+        s = "макс" Or s = "мин" Or s Like "max*" Or s Like "min*" Or s Like "примечан*")
 End Function
 
 Private Function RegisterObject(ByVal nm As String, ByVal grp As String) As Long
@@ -632,26 +641,27 @@ End Sub
 Private Sub AddLogRow(ByVal modeText As String, ByVal fileName As String, ByVal total As Long, _
                       ByVal added As Long, ByVal same As Long, ByVal conflicts As Long, _
                       ByVal objCount As Long, ByVal period As String)
-    Dim hdr As Range, blk As Range, a As Variant, r As Long, c As Long
+    ' Журнал на листе «Настройки»: столбцы заданы именами log_C1..log_C9
+    ' (ячейки заголовков). Новая запись — первой, старые сдвигаются вниз.
+    ' Ячейки журнала объединенные, поэтому строки перебираются по MergeArea.
+    Dim vals As Variant, ws As Worksheet, c As Range, rowNo() As Long
+    Dim col As Long, j As Long, r As Long
     On Error GoTo Done
-    Set hdr = ThisWorkbook.Names("log_Header").RefersToRange
-    Set blk = hdr.Offset(1, 0).Resize(LOG_MAX_ROWS, LOG_COLS)
-    a = blk.Value
-    For r = LOG_MAX_ROWS To 2 Step -1
-        For c = 1 To LOG_COLS
-            a(r, c) = a(r - 1, c)
-        Next c
+    vals = Array(Now, fileName, modeText, total, added, same, conflicts, objCount, period)
+    ReDim rowNo(1 To LOG_MAX_ROWS)
+    Set c = ThisWorkbook.Names("log_C1").RefersToRange
+    Set ws = c.Worksheet
+    For r = 1 To LOG_MAX_ROWS
+        Set c = c.Offset(c.MergeArea.Rows.Count, 0)
+        rowNo(r) = c.Row
     Next r
-    a(1, 1) = Now
-    a(1, 2) = fileName
-    a(1, 3) = modeText
-    a(1, 4) = total
-    a(1, 5) = added
-    a(1, 6) = same
-    a(1, 7) = conflicts
-    a(1, 8) = objCount
-    a(1, 9) = period
-    blk.Value = a
+    For j = 1 To LOG_COLS
+        col = ThisWorkbook.Names("log_C" & j).RefersToRange.Column
+        For r = LOG_MAX_ROWS To 2 Step -1
+            ws.Cells(rowNo(r), col).Value = ws.Cells(rowNo(r - 1), col).Value
+        Next r
+        ws.Cells(rowNo(1), col).Value = vals(j - 1)
+    Next j
 Done:
 End Sub
 
