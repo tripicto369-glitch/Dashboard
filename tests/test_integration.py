@@ -239,7 +239,7 @@ def read_block(doc, sheet, rng):
     for i, row in enumerate(data):
         orow = []
         for j, v in enumerate(row):
-            if v == "":
+            if v is None or v == "":  # getDataArray gives None for error results
                 cell = r.getCellByPosition(j, i)
                 err = cell.getError()
                 orow.append(("ERR", err) if err else None)

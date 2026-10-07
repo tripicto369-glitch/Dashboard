@@ -253,24 +253,37 @@ def _run_child(body: str, sig: int, delay: float, wait_for_up: bool) -> tuple:
     """
     work = _env()["work"]
     code = (
-        "import sys, time\n"
+        "import signal, sys, time\n"
+        # Background jobs of a non-interactive shell inherit SIGINT as
+        # SIG_IGN, in which case Python never raises KeyboardInterrupt.
+        "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
         f"sys.path.insert(0, {str(ROOT / 'tests')!r})\n"
         "from lo_harness import LibreOffice\n"
         f"lo = LibreOffice(base_dir={str(work)!r})\n"
         "print(lo.profile_dir, flush=True)\n" + body
     )
     child = subprocess.Popen([sys.executable, "-I", "-c", code], stdout=subprocess.PIPE, text=True)
+    profile = None
     try:
-        profile = Path(child.stdout.readline().strip())
+        line = child.stdout.readline().strip()
+        assert line, f"child failed before creating a profile (exit code {child.wait()})"
+        profile = Path(line)
         if wait_for_up:
             child.stdout.readline()
         time.sleep(delay)
         child.send_signal(sig)
         rc = child.wait(timeout=60)
     finally:
-        if child.poll() is None:
+        if child.poll() is None:  # test failed: don't leave soffice behind
             child.kill()
             child.wait()
+            for pid in _procs_using(profile) if profile else ():
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            if profile:
+                shutil.rmtree(profile, ignore_errors=True)
     deadline = time.monotonic() + 10
     while _procs_using(profile) and time.monotonic() < deadline:
         time.sleep(0.1)
