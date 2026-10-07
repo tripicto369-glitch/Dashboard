@@ -21,6 +21,24 @@ from .theme import C, FONT
 
 Rect = tuple[int, int, int, int]
 
+# Кэш результатов формул {(лист, строка, столбец): значение}. Excel показывает
+# сохраненные результаты до пересчета (например, в режиме защищенного просмотра),
+# поэтому сборка может заполнить их заранее (см. build.py).
+FORMULA_CACHE: dict = {}
+
+
+class Rich:
+    """Статичный текст из нескольких фрагментов разного стиля: Rich(("TAT", {...}), ...)."""
+
+    def __init__(self, *parts: tuple[str, dict]):
+        self.parts = parts
+
+
+def cached(ws, r: int, c: int):
+    """Сохраненный результат формулы (0 — как пишет xlsxwriter по умолчанию)."""
+    v = FORMULA_CACHE.get((ws.name, r, c))
+    return 0 if v is None else v
+
 _BORDER_SIDES = ("left", "right", "top", "bottom")
 
 
@@ -91,6 +109,8 @@ class Canvas:
                  if k in style}
         if value is None:
             kind = "blank"
+        elif isinstance(value, Rich):
+            kind = "rich"
         elif isinstance(value, str) and value.startswith("{="):
             kind = "array"
         elif isinstance(value, str) and value.startswith("="):
@@ -297,9 +317,17 @@ class Canvas:
         if ct.kind == "blank":
             ws.write_blank(r, c, None, f)
         elif ct.kind == "array":
-            ws.write_array_formula(r, c, r, c, ct.value, f)
+            ws.write_array_formula(r, c, r, c, ct.value, f, cached(ws, r, c))
         elif ct.kind == "formula":
-            ws.write_formula(r, c, ct.value, f)
+            ws.write_formula(r, c, ct.value, f, cached(ws, r, c))
+        elif ct.kind == "rich":
+            args = []
+            for text, st in ct.value.parts:
+                base = {k: v for k, v in ct.style.items() if not k.startswith("b_")}
+                base.update(st)
+                base["bg"] = None
+                args += [self.fmt(base), text]
+            ws.write_rich_string(r, c, *args, f)
         elif ct.kind == "url":
             ws.write_url(r, c, ct.extra["url"], f, string=ct.value,
                          tip=ct.extra.get("url_tip"))

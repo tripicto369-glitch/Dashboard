@@ -23,8 +23,8 @@ from dataclasses import dataclass
 import xlsxwriter
 from xlsxwriter.utility import xl_col_to_name, xl_rowcol_to_cell
 
-from .canvas import Canvas
-from .theme import C, FONT, MONTHS_RU, ZONE_COLOR
+from .canvas import Canvas, Rich
+from .theme import C, FONT, FONT_SEMI, MONTHS_RU, ZONE_COLOR
 
 # ----------------------------------------------------------------------------
 # Константы структуры
@@ -37,13 +37,13 @@ LOG_ROWS = 50           # строк журнала загрузок (совпа
 S_DASH, S_OBJ, S_TREND, S_ALARM, S_REPORT, S_SET, S_DB, S_CALC = (
     "Сводка", "СИКН", "Тренды", "Тревоги", "Отчеты", "Настройки", "БД", "Расчет")
 
-NAV = [  # (подпись, лист, иконка, кодовое имя)
-    ("СВОДКА", S_DASH, "nav_dashboard", "shDash"),
-    ("СИКН", S_OBJ, "nav_sikn", "shObj"),
-    ("ТРЕНДЫ", S_TREND, "nav_trends", "shTrend"),
-    ("ТРЕВОГИ", S_ALARM, "nav_alarms", "shAlarm"),
-    ("ОТЧЕТЫ", S_REPORT, "nav_reports", "shReport"),
-    ("НАСТРОЙКИ", S_SET, "nav_settings", "shSettings"),
+NAV = [  # (подпись, лист, иконка, кодовое имя, подсказка)
+    ("СВОДКА", S_DASH, "nav_dashboard", "shDash", "Сводка"),
+    ("СИКН", S_OBJ, "nav_sikn", "shObj", "СИКН"),
+    ("ТРЕНДЫ", S_TREND, "nav_trends", "shTrend", "Тренды"),
+    ("ТРЕВОГИ", S_ALARM, "nav_alarms", "shAlarm", "Тревоги"),
+    ("ОТЧЕТЫ", S_REPORT, "nav_reports", "shReport", "Отчеты"),
+    ("НАСТРОЙКИ", S_SET, "nav_settings", "shSettings", "Настройки"),
 ]
 
 # Лист «Расчет»: строки (1-based)
@@ -51,11 +51,15 @@ OBJ_R0 = 46                      # объекты 46..85
 DAYNUM_R, DAYDATE_R = 90, 91     # номер дня / дата дня месяца (столбцы L..AP)
 SORT_R0 = 92                     # сортированные строки 92..131
 MAXDAY_R, LIM_R, YEL_R, GRN_R, LAST_R, CAT_R = 134, 135, 136, 137, 138, 139
-MONTH_R0, MONTH_N = 142, 60      # список месяцев 142..201
+MONTH_R0, MONTH_N = 142, 124     # список месяцев 142..265 (больше, чем дней в базе)
 TR_C0 = 11                       # столбец L (0-based) — первый день тренда
 TR_C1 = TR_C0 + 30               # столбец AP — 31-й день
 
 W, H = 1390, 1006                # размер макета дашборда, px
+
+# Форматы значений: «?» дополняет второй знак пробелом — запятые в столбце ровные
+VAL_FMT = "0.0?"
+CHG_FMT = "+0.0?;-0.0?;0.0?"
 
 
 def _q(sheet: str) -> str:
@@ -94,41 +98,69 @@ class Assets:
         return p
 
 
-def draw_header(cv: Canvas, assets: Assets) -> None:
+# «Обновление: N мин назад» — время с последней загрузки (NOW() пересчитывается
+# макросом каждую минуту; без макросов — при любом пересчете).
+UPDATED_FORMULA = (
+    '=IF(N(sys_LastImport)=0,"Данные еще не загружались",'
+    '"Обновление: "&IF(NOW()-sys_LastImport<1/1440,"только что",'
+    'IF(NOW()-sys_LastImport<1/24,INT((NOW()-sys_LastImport)*1440)&" мин назад",'
+    'IF(NOW()-sys_LastImport<1,INT((NOW()-sys_LastImport)*24)&" ч "&'
+    'MOD(INT((NOW()-sys_LastImport)*1440),60)&" мин назад",'
+    'INT(NOW()-sys_LastImport)&" дн "&MOD(INT((NOW()-sys_LastImport)*24),24)&" ч назад"))))')
+UPD_RECT = (1060, 48, 1352, 70)
+DOT_RECT = (1352, 48, 1372, 70)
+
+
+def draw_header(cv: Canvas, assets: Assets, code: str) -> None:
     cv.fill((0, 0, cv.width, 80), C["header"])
     cv.hline(0, cv.width, 80, C["divider"])
     cv.image(18, 17, assets.icon("logo_mark"), scale=0.48)
-    cv.put((66, 20, 196, 62), "=cfg_Company", bold=True, size=17, color=C["logo"],
-           italic=True)
-    cv.vline(206, 16, 72, C["divider"])
-    cv.put((224, 14, 1080, 46), "=cfg_Title", bold=True, size=16, color=C["text"])
-    cv.put((224, 48, 1080, 70), "=cfg_Subtitle", bold=True, size=10, color=C["green_soft"])
-    cv.put((1110, 12, 1370, 44), "=TODAY()", bold=True, size=20, color=C["text"],
+    cv.put((68, 20, 204, 62), Rich(("TAT", {"color": C["logo_red"]}),
+                                   ("NEFT", {"color": C["logo"]})),
+           bold=True, size=17)
+    cv.vline(212, 16, 72, C["divider"])
+    cv.put((228, 14, 1080, 46), "=cfg_Title", font=FONT_SEMI, size=16, color=C["text"])
+    cv.put((228, 48, 1040, 70), "=cfg_Subtitle", font=FONT_SEMI, size=10,
+           color=C["green_soft"])
+    cv.put((1110, 12, 1370, 44), "=TODAY()", font=FONT_SEMI, size=20, color=C["text"],
            align="right", num="dd.mm.yyyy")
+    cv.put(UPD_RECT, UPDATED_FORMULA, size=9, color=C["muted"], align="right",
+           name="ui_Upd_" + code)
+    cv.put(DOT_RECT, "●", size=9, align="center", color=C["dim"])
+
+
+def header_cf(wb, ws, cv: Canvas) -> None:
+    """Цвет индикатора свежести данных: < 1 сут — зеленый, < 3 сут — желтый, иначе красный."""
+    r, c, _, _ = cv.cell_range(DOT_RECT)
+    age = "(NOW()-sys_LastImport)"
+    for crit, color in ((f"=AND(N(sys_LastImport)>0,{age}<1)", C["green"]),
+                        (f"=AND(N(sys_LastImport)>0,{age}>=1,{age}<3)", C["yellow"]),
+                        (f"=AND(N(sys_LastImport)>0,{age}>=3)", C["red"])):
+        ws.conditional_format(r, c, r, c, {"type": "formula", "criteria": crit,
+                                           "format": wb.add_format({"font_color": color})})
 
 
 def draw_nav(cv: Canvas, assets: Assets, active: int, bottom: int = 948) -> None:
     cv.fill((10, 92, 110, bottom), C["nav"])
     cv.frame((10, 92, 110, bottom), C["border"])
-    for k, (label, sheet, icon, _code) in enumerate(NAV):
+    for k, (label, sheet, icon, _code, tip) in enumerate(NAV):
         y0 = 100 + k * 90
         url = f"internal:{_q(sheet)}!A1"
         if k == active:
             cv.fill((16, y0, 104, y0 + 82), C["nav_active"])
             cv.frame((16, y0, 104, y0 + 82), C["divider"])
-        cv.put((16, y0 + 50, 104, y0 + 74), label, bold=True, size=8.5, align="center",
-               color=C["text"] if k == active else C["text2"], url=url,
-               url_tip=label.capitalize())
+        cv.put((16, y0 + 50, 104, y0 + 74), label, font=FONT_SEMI, size=8.5, align="center",
+               color=C["text"] if k == active else C["text2"], url=url, url_tip=tip)
         if k < len(NAV) - 1:
             cv.hline(26, 94, y0 + 86, C["line"])
         variant = "_active" if k == active else "_normal"
-        cv.image(44, y0 + 12, assets.icon(icon + variant), scale=0.5, url=url,
-                 tip=label.capitalize())
+        cv.image(44, y0 + 12, assets.icon(icon + variant), scale=0.5, url=url, tip=tip)
 
 
 def button(cv: Canvas, x: int, y: int, path: str, macro: str) -> None:
-    """Кнопка-картинка с макросом: атрибут macro проставляется при постобработке,
-    а при открытии книги макрос дополнительно назначается из VBA по тексту btn:…"""
+    """Кнопка-картинка с макросом: при постобработке фигура получает имя btn<Макрос>
+    и атрибут macro="[0]!<Макрос>"; при открытии книги VBA (AssignButtonMacros)
+    дополнительно назначает макрос по имени фигуры."""
     cv.image(x, y, path, scale=0.5, descr="btn:" + macro)
 
 
@@ -172,13 +204,16 @@ PARAMS = [  # (имя, подпись, формула, массив?, форма
     ("c_StateText", "Состояние, текст",
      '=CHOOSE(c_State+1,"НЕТ ДАННЫХ","НОРМА","ВНИМАНИЕ","РИСК","ПРЕВЫШЕНИЕ")', False, "@"),
     ("c_StateSub", "Состояние, пояснение",
-     '=CHOOSE(c_State+1,"Загрузите файл с данными","Превышений не зафиксировано",'
+     '=CHOOSE(c_State+1,IF(c_ObjCount=0,"Загрузите файл с данными",IF(c_IsCurrent,'
+     '"Нет значений за сегодня и вчера","Нет значений за "&LOWER(c_MonthLabel))),'
+     '"Превышений не зафиксировано",'
      '"В желтой зоне: "&c_CntYellow&" СИКН","В красной зоне: "&c_CntRed&" СИКН",'
      '"Выше норматива: "&c_CntOver&" СИКН")', False, "@"),
-    ("c_ZoneG", "Подпись зеленой зоны", '="0 – "&FIXED(cfg_Green,1)&" ppm"', False, "@"),
-    ("c_ZoneY", "Подпись желтой зоны", '=FIXED(cfg_Green,1)&" – "&FIXED(cfg_Yellow,1)&" ppm"', False, "@"),
-    ("c_ZoneR", "Подпись красной зоны", '="> "&FIXED(cfg_Yellow,1)&" ppm"', False, "@"),
-    ("c_ZoneX", "Подпись превышения", '="> "&FIXED(cfg_Limit,1)&" ppm"', False, "@"),
+    # FIXED — с разделителем дробной части по региональным настройкам (1,5); 2 знака, если нужно
+    ("c_ZoneG", "Подпись зеленой зоны", '="0 – "&FIXED(cfg_Green,IF(ROUND(cfg_Green,1)=cfg_Green,1,2))&" ppm"', False, "@"),
+    ("c_ZoneY", "Подпись желтой зоны", '=FIXED(cfg_Green,IF(ROUND(cfg_Green,1)=cfg_Green,1,2))&" – "&FIXED(cfg_Yellow,IF(ROUND(cfg_Yellow,1)=cfg_Yellow,1,2))&" ppm"', False, "@"),
+    ("c_ZoneR", "Подпись красной зоны", '="> "&FIXED(cfg_Yellow,IF(ROUND(cfg_Yellow,1)=cfg_Yellow,1,2))&" ppm"', False, "@"),
+    ("c_ZoneX", "Подпись превышения", '="> "&FIXED(cfg_Limit,IF(ROUND(cfg_Limit,1)=cfg_Limit,1,2))&" ppm"', False, "@"),
     ("c_MonthCount", "Месяцев в списке", f"=COUNT(B{MONTH_R0}:B{MONTH_R0 + MONTH_N - 1})", False, "0"),
     ("c_LastMaxDate", "Последний день с максимумом",
      f"{{=MAX(IF(ISNUMBER(L{MAXDAY_R}:AP{MAXDAY_R}),L{DAYDATE_R}:AP{DAYDATE_R},0))}}", True, "dd.mm.yyyy"),
@@ -250,11 +285,14 @@ def build_calc_sheet(wb, ws) -> None:
             f'{{=IF($E{r}="",0,MAX(IF((db_Dates<$D{r})*ISNUMBER(INDEX(db_Vals,0,$A{r})),db_Dates,0)))}}',
             date_f)
         ws.write_formula(ri, 6, f'=IF($F{r}=0,"",INDEX(db_Vals,MATCH($F{r},db_Dates,0),$A{r}))')
-        ws.write_formula(ri, 7, f'=IF(OR($E{r}="",$G{r}=""),"",ROUND($E{r}-$G{r},4))')
-        ws.write_formula(ri, 8, f'=IF($B{r}="",-1,IF($E{r}="",0,IF($E{r}<=cfg_Green,1,'
-                                f'IF($E{r}<=cfg_Yellow,2,IF($E{r}<=cfg_Limit,3,4)))))')
+        # зона и изменение — по значению, округленному до 2 знаков (как на экране)
+        ws.write_formula(ri, 7, f'=IF(OR($E{r}="",$G{r}=""),"",'
+                                f'ROUND(ROUND($E{r},2)-ROUND($G{r},2),2))')
+        ws.write_formula(ri, 8, f'=IF($B{r}="",-1,IF($E{r}="",0,IF(ROUND($E{r},2)<=cfg_Green,1,'
+                                f'IF(ROUND($E{r},2)<=cfg_Yellow,2,IF(ROUND($E{r},2)<=cfg_Limit,3,4)))))')
+        # ключ сортировки: значение по убыванию, при равенстве — порядок базы
         ws.write_formula(ri, 9, f'=IF($B{r}="",-2-$A{r}/1000000,IF($E{r}="",-1-$A{r}/1000000,'
-                                f'$E{r}-$A{r}/10000000))')
+                                f'ROUND($E{r},6)-$A{r}/100000000))')
         ws.write_formula(ri, 10, f'=IF(OR($E{r}="",c_DataDate=""),0,IF($D{r}<c_DataDate,1,0))')
 
     # Сортировка по убыванию значения + тренды по дням выбранного месяца
@@ -334,7 +372,8 @@ def build_calc_sheet(wb, ws) -> None:
 def build_db_sheet(wb, ws) -> None:
     last_col = xl_col_to_name(MAX_OBJ)  # AO
     last_row = 2 + DB_ROWS
-    wb.define_name("db_N", f"=MAX(1,COUNT({_q(S_DB)}!$A$3:$A${last_row}))")
+    # номер последней строки с датой (пустые строки внутри не мешают)
+    wb.define_name("db_N", f"=MAX(1,IFERROR(MATCH(9.99E+307,{_q(S_DB)}!$A$3:$A${last_row}),0))")
     wb.define_name("db_Names", f"={_q(S_DB)}!$B$1:${last_col}$1")
     wb.define_name("db_Groups", f"={_q(S_DB)}!$B$2:${last_col}$2")
     wb.define_name("db_Dates", f"={_q(S_DB)}!$A$3:INDEX({_q(S_DB)}!$A$3:$A${last_row},db_N)")
@@ -367,44 +406,43 @@ def build_db_sheet(wb, ws) -> None:
 # ----------------------------------------------------------------------------
 def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     cv = Canvas(wb, ws, W, H)
-    draw_header(cv, assets)
-    cv.put((1080, 48, 1352, 70), None, name="ui_Updated")  # формула ниже (NOW)
-    cv.put((1352, 48, 1372, 70), "●", size=9, align="center", color=C["dim"])
+    draw_header(cv, assets, "shDash")
     draw_nav(cv, assets, active=0)
 
     # --- панель управления: период, дата данных, загрузка, импорт
-    lbl = dict(bold=True, size=8.5, color=C["muted"])
+    lbl = dict(font=FONT_SEMI, size=8.5, color=C["muted"])
     cv.put((126, 92, 194, 126), "ПЕРИОД:", **lbl)
     cv.fill((194, 92, 398, 126), C["input"])
     cv.frame((194, 92, 398, 126), C["divider"])
-    cv.put((194, 92, 372, 126), "", bold=True, size=11, color=C["text"], indent=1, num="@",
-           name="sel_Month",
+    cv.put((194, 92, 372, 126), "", font=FONT_SEMI, size=11, color=C["text"], indent=1,
+           num="@", name="sel_Month",
            validation={"validate": "list", "source": "=lst_Months",
-                       "input_title": "Период отображения",
-                       "input_message": "Выберите месяц из списка",
                        "error_title": "Период", "error_message": "Выберите месяц из списка.",
                        "error_type": "stop"})
-    cv.put((372, 92, 398, 126), "▼", size=8, color=C["muted"], align="center")
+    # «▼» — щелчок по нему переводит выделение на ячейку месяца (shDash.Worksheet_SelectionChange)
+    cv.put((372, 92, 398, 126), "▼", size=8, color=C["muted"], align="center",
+           name="ui_MonthArrow")
     cv.put((422, 92, 512, 126), "ДАННЫЕ НА:", **lbl)
-    cv.put((512, 92, 612, 126), '=IF(c_DataDate="","—",c_DataDate)', bold=True, size=11,
+    cv.put((512, 92, 612, 126), '=IF(c_DataDate="","—",c_DataDate)', font=FONT_SEMI, size=11,
            num="dd.mm.yyyy", align="left")
     cv.put((636, 92, 732, 126), "ЗАГРУЖЕНО:", **lbl)
     cv.put((732, 92, 888, 126), '=IF(N(sys_LastImport)=0,"—",sys_LastImport)', size=10,
            num="dd.mm.yyyy hh:mm", align="left")
     cv.put((906, 92, 952, 126), "ФАЙЛ:", **lbl)
-    cv.put((952, 92, 1186, 126), '=IF(sys_LastFile="","—",sys_LastFile)', size=9,
-           color=C["text2"], shrink=True)
+    cv.put((952, 92, 1186, 126),
+           '=IF(sys_LastFile="","—",IF(LEN(sys_LastFile)>36,LEFT(sys_LastFile,34)&"…",'
+           'sys_LastFile))', size=9, color=C["text2"])
     button(cv, 1196, 92, assets.button("import"), "ImportData")
 
     # --- KPI: общее состояние
     card1 = (126, 138, 400, 238)
     cv.fill(card1, C["panel"])
     cv.frame(card1, C["border"])
-    cv.put((140, 146, 392, 166), "ОБЩЕЕ СОСТОЯНИЕ", bold=True, size=8.5, color=C["text2"])
+    cv.put((140, 146, 392, 166), "ОБЩЕЕ СОСТОЯНИЕ", font=FONT_SEMI, size=8.5, color=C["text2"])
     # значок-щит: пять картинок, видимую выбирает макрос UpdateStateIcon по c_State
     for st in range(5):
         cv.image(142, 168, assets.icon(f"state_{st}"), scale=0.5, descr=f"state:{st}")
-    cv.put((212, 170, 392, 200), "=c_StateText", bold=True, size=16, color=C["green"],
+    cv.put((212, 170, 392, 200), "=c_StateText", font=FONT_SEMI, size=16, color=C["green"],
            align="left")
     cv.put((212, 200, 392, 222), "=c_StateSub", size=8.5, color=C["text2"], align="left")
 
@@ -412,17 +450,17 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     card2 = (412, 138, 1380, 238)
     cv.fill(card2, C["panel"])
     cv.frame(card2, C["border"])
-    klabel = dict(bold=True, size=8.5, color=C["text2"])
-    big = dict(bold=True, size=24, valign="bottom")
+    klabel = dict(font=FONT_SEMI, size=8.5, color=C["text2"])
+    big = dict(size=24, valign="bottom", shrink=True)   # shrink: без «####» у больших чисел
     unit = dict(size=11, color=C["text2"], valign="bottom")
     cv.put((426, 146, 622, 166), "МАКСИМАЛЬНОЕ ЗНАЧЕНИЕ", **klabel)
-    cv.put((426, 168, 500, 206), '=IF(c_MaxVal="","—",c_MaxVal)', align="right", num="0.0#", **big)
-    cv.put((500, 168, 600, 206), "ppm", indent=1, **unit)
-    cv.put((426, 208, 622, 230), "=c_MaxName", size=9, color=C["muted"])
+    cv.put((426, 168, 490, 206), '=IF(c_MaxVal="","—",c_MaxVal)', align="right", num="0.0#", **big)
+    cv.put((490, 168, 600, 206), '=IF(c_MaxVal="","","ppm")', indent=1, **unit)
+    cv.put((426, 208, 622, 230), "=c_MaxName", size=9, color=C["muted"], shrink=True)
     cv.vline(628, 150, 228, C["divider"])
     cv.put((642, 146, 806, 166), "СРЕДНЕЕ ЗНАЧЕНИЕ", **klabel)
-    cv.put((642, 168, 714, 206), '=IF(c_AvgVal="","—",c_AvgVal)', align="right", num="0.0#", **big)
-    cv.put((714, 168, 800, 206), "ppm", indent=1, **unit)
+    cv.put((642, 168, 706, 206), '=IF(c_AvgVal="","—",c_AvgVal)', align="right", num="0.0#", **big)
+    cv.put((706, 168, 800, 206), '=IF(c_AvgVal="","","ppm")', indent=1, **unit)
     cv.put((642, 208, 806, 230), '=IF(c_CntValued=0,"","по "&c_CntValued&" СИКН")', size=9,
            color=C["muted"])
     cv.vline(812, 150, 228, C["divider"])
@@ -431,8 +469,8 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
              (944, 1050, "ЖЕЛТАЯ ЗОНА", "=c_CntYellow", C["yellow"]),
              (1058, 1166, "КРАСНАЯ ЗОНА", "=c_CntRed", C["red"])]
     for i, (x0, x1, t, frm, col) in enumerate(zones):
-        cv.put((x0, 170, x1, 188), t, bold=True, size=8, color=col)
-        cv.put((x0, 190, x1, 230), frm, bold=True, size=24, color=col, num="0", align="left")
+        cv.put((x0, 170, x1, 188), t, font=FONT_SEMI, size=8, color=col)
+        cv.put((x0, 190, x1, 230), frm, size=24, color=col, num="0", align="left")
         if i:
             cv.vline(x0 - 6, 172, 228, C["line"])
     cv.vline(1172, 150, 228, C["divider"])
@@ -445,11 +483,13 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     tp = (126, 250, 1036, 948)
     cv.fill(tp, C["panel"])
     cv.frame(tp, C["border"])
-    cv.put((140, 250, 740, 284), '="СОДЕРЖАНИЕ ЛХОС ПО СИКН — "&UPPER(c_MonthLabel)', bold=True,
-           size=10, color=C["text2"])
-    cv.put((740, 250, 1022, 284),
-           '=IF(c_ObjCount=0,"База пуста — нажмите «ИМПОРТ ДАННЫХ»",'
-           'IF(c_StaleCount>0,"* — значение за предыдущую дату",""))',
+    cv.put((140, 250, 700, 284), '="СОДЕРЖАНИЕ ЛХОС ПО СИКН — "&UPPER(c_MonthLabel)',
+           font=FONT_SEMI, size=10, color=C["text2"])
+    stale_note = 'IF(c_StaleCount>0,"* — значение за предыдущую дату","")'
+    cv.put((700, 250, 1022, 284),
+           f'=IF(c_ObjCount=0,"База пуста — нажмите «ИМПОРТ ДАННЫХ»",'
+           f'IF(COUNTA(db_Names)>{TABLE_ROWS},"Показаны {TABLE_ROWS} из "&COUNTA(db_Names)&" СИКН"'
+           f'&IF(c_StaleCount>0,"; * — значение за предыдущую дату",""),{stale_note}))',
            size=8, color=C["muted"], align="right")
     cols = [  # (x0, x1, заголовок, выравнивание)
         (140, 180, "№", "center"),
@@ -457,13 +497,13 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
         (360, 470, "ЗНАЧЕНИЕ, ppm", "center"),
         (470, 610, "СТАТУС", "left"),
         (610, 740, "ЗОНА", "center"),
-        (740, 880, "ИЗМЕНЕНИЕ (24Ч)", "center"),
+        (740, 880, "ИЗМЕНЕНИЕ (24ч)", "center"),
         (880, 1022, "ТРЕНД", "center"),
     ]
     hy0, hy1 = 284, 314
     cv.fill((140, hy0, 1022, hy1), C["panel_hdr"])
     for x0, x1, t, al in cols:
-        cv.put((x0, hy0, x1, hy1), t, bold=True, size=8, color=C["text2"], align=al,
+        cv.put((x0, hy0, x1, hy1), t, font=FONT_SEMI, size=8, color=C["text2"], align=al,
                indent=1 if al == "left" else 0)
     cv.hline(140, 1022, hy1, C["divider"])
     row_h = 26
@@ -479,23 +519,25 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
         chg = _calc(f"$F${r}")
         cv.put((140, y0, 180, y1), f'=IF({nm}="","",{k + 1})', size=9, color=C["text2"],
                align="center")
-        cv.put((180, y0, 360, y1), f"={nm}", size=9.5, color=C["text"], indent=1)
-        cv.put((360, y0, 470, y1), f'=IF({nm}="","",IF({val}="","—",{val}))', bold=True,
-               size=10, color=C["green"], align="center", num="0.0#")
+        cv.put((180, y0, 360, y1), f"={nm}", size=9.5, color=C["text"], indent=1, shrink=True)
+        cv.put((360, y0, 470, y1), f'=IF({nm}="","",IF({val}="","—",{val}))', font=FONT_SEMI,
+               size=10, color=C["green"], align="center", num=VAL_FMT)
         cv.put((470, y0, 610, y1),
                f'=IF({nm}="","",CHOOSE({zone}+1,"●  НЕТ ДАННЫХ","●  НОРМА","●  ВНИМАНИЕ",'
-               f'"●  РИСК","●  ПРЕВЫШЕНИЕ"))', bold=True, size=8.5, color=C["green"], indent=1)
+               f'"●  РИСК","●  ПРЕВЫШЕНИЕ"))', font=FONT_SEMI, size=8.5, color=C["green"],
+               indent=1)
         cv.put((610, y0, 740, y1),
                f'=IF({nm}="","",CHOOSE({zone}+1,"—",c_ZoneG,c_ZoneY,c_ZoneR,c_ZoneX))',
                size=9, color=C["green"], align="center")
         cv.put((740, y0, 834, y1), f'=IF(OR({nm}="",{chg}=""),"",{chg})', size=9.5,
-               color=C["text"], align="right", num="+0.0#;-0.0#;0.0")
+               color=C["text"], align="right", num=CHG_FMT)
         cv.put((834, y0, 872, y1),
                f'=IF(OR({nm}="",{chg}=""),"",IF({chg}>0.00001,"↑",IF({chg}<-0.00001,"↓","—")))',
-               bold=True, size=10, color=C["green"], align="center")
+               bold=True, size=10, color=C["text2"], align="center")
         cv.sparkline((880, y0, 1022, y1), {
             "range": f"{_q(S_CALC)}!{xl_col_to_name(TR_C0)}{r}:{xl_col_to_name(TR_C1)}{r}",
             "series_color": C["green"], "weight": 1.0, "empty_cells": "gaps",
+            "last_point": True, "last_color": C["green"],
         })
         cv.hline(140, 1022, y1, C["line"])
     for x in (180, 360, 470, 610, 740, 880):
@@ -505,25 +547,26 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     p1 = (1050, 250, 1380, 560)
     cv.fill(p1, C["panel"])
     cv.frame(p1, C["border"])
-    cv.put((1064, 250, 1370, 280), "НОРМАТИВ И ЗОНЫ", bold=True, size=10, color=C["text2"])
-    cv.put((1064, 282, 1226, 312), "ПРЕДЕЛЬНОЕ ЗНАЧЕНИЕ", bold=True, size=8, color=C["muted"])
-    cv.put((1226, 282, 1366, 312), "=cfg_Limit", bold=True, size=13, align="right",
-           num='"≤ "0.0" ppm"')
+    cv.put((1064, 250, 1370, 280), "НОРМАТИВ И ЗОНЫ", font=FONT_SEMI, size=10, color=C["text2"])
+    cv.put((1064, 282, 1226, 312), "ПРЕДЕЛЬНОЕ ЗНАЧЕНИЕ", font=FONT_SEMI, size=8,
+           color=C["muted"])
+    cv.put((1226, 282, 1366, 312), "=cfg_Limit", font=FONT_SEMI, size=13, align="right",
+           num='"≤ "0.0#" ppm"')
     blocks = [(322, 392, C["red_block"]), (392, 462, C["yellow_block"]), (462, 532, C["green_block"])]
     for y0, y1, col in blocks:
         cv.fill((1124, y0, 1168, y1), col)
     scale = [(314, "=cfg_Limit"), (384, "=cfg_Yellow"), (454, "=cfg_Green"), (524, 0)]
     for y, v in scale:
         cv.put((1064, y, 1116, y + 16), v, size=8.5, color=C["muted"], align="right",
-               num="0.0" if isinstance(v, str) else "0")
+               num="0.0#" if isinstance(v, str) else "0")
     ztxt = [
         (326, "=c_ZoneR", "КРАСНАЯ ЗОНА", "Повышенный риск", C["red"]),
         (398, "=c_ZoneY", "ЖЕЛТАЯ ЗОНА", "Внимание", C["yellow"]),
         (468, "=c_ZoneG", "ЗЕЛЕНАЯ ЗОНА", "Норма", C["green"]),
     ]
     for y, frm, t1, t2, col in ztxt:
-        cv.put((1180, y, 1366, y + 20), frm, bold=True, size=11, color=col)
-        cv.put((1180, y + 20, 1366, y + 38), t1, bold=True, size=8, color=col)
+        cv.put((1180, y, 1366, y + 20), frm, font=FONT_SEMI, size=11, color=col)
+        cv.put((1180, y + 20, 1366, y + 38), t1, font=FONT_SEMI, size=8, color=col)
         cv.put((1180, y + 38, 1366, y + 56), t2, size=8.5, color=C["text"])
     cv.hline(1168, 1366, 392, C["line"])
     cv.hline(1168, 1366, 462, C["line"])
@@ -534,7 +577,8 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     p2 = (1050, 572, 1380, 752)
     cv.fill(p2, C["panel"])
     cv.frame(p2, C["border"])
-    cv.put((1064, 572, 1370, 602), "РАСПРЕДЕЛЕНИЕ ПО ЗОНАМ", bold=True, size=10, color=C["text2"])
+    cv.put((1064, 572, 1370, 602), "РАСПРЕДЕЛЕНИЕ ПО ЗОНАМ", font=FONT_SEMI, size=10,
+           color=C["text2"])
     donut = wb.add_chart({"type": "doughnut"})
     donut.add_series({
         "name": "Зоны",
@@ -555,9 +599,10 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
                         "layout": {"x": 0.08, "y": 0.06, "width": 0.84, "height": 0.84}})
     cv.chart((1060, 604, 1196, 748), donut)
     # число в центре кольца — в ячейках под прозрачной диаграммой
-    cv.put((1090, 652, 1166, 682), "=c_ObjCount", bold=True, size=20, align="center", num="0")
-    cv.put((1090, 682, 1166, 698), "ВСЕГО", bold=True, size=7, color=C["muted"], align="center",
-           valign="top")
+    cv.put((1090, 652, 1166, 682), "=c_ObjCount", font=FONT_SEMI, size=20, align="center",
+           num="0")
+    cv.put((1090, 682, 1166, 698), "ВСЕГО", font=FONT_SEMI, size=7, color=C["muted"],
+           align="center", valign="top")
     legend = [(622, "Зеленая зона", "=c_LegG", C["green_block"]),
               (652, "Желтая зона", "=c_LegY", C["yellow_block"]),
               (682, "Красная зона", "=c_LegR", C["red_block"])]
@@ -570,7 +615,7 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     p3 = (1050, 764, 1380, 948)
     cv.fill(p3, C["panel"])
     cv.frame(p3, C["border"])
-    cv.put((1064, 764, 1370, 794), "ДИНАМИКА МАКСИМАЛЬНОГО ЗНАЧЕНИЯ", bold=True, size=10,
+    cv.put((1064, 764, 1370, 794), "ДИНАМИКА МАКСИМАЛЬНОГО ЗНАЧЕНИЯ", font=FONT_SEMI, size=10,
            color=C["text2"])
     cv.chart((1054, 794, 1376, 944), max_chart(wb))
 
@@ -579,35 +624,27 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     cv.hline(0, W, 958, C["divider"])
     for st in range(5):  # значок состояния в подвале, переключается вместе со щитом
         cv.image(26, 967, assets.icon(f"foot_{st}"), scale=0.5, descr=f"foot:{st}")
-    cv.put((58, 962, 470, 996), '="СОСТОЯНИЕ: "&c_Footer', bold=True, size=9.5, color=C["green"])
+    cv.put((58, 962, 470, 996), '="СОСТОЯНИЕ: "&c_Footer', font=FONT_SEMI, size=9.5,
+           color=C["green"])
     cv.image(540, 972, assets.icon("ui_doc"), scale=20 / 48)
     cv.put((566, 962, 1010, 996),
            '=IF(sys_LastFile="","Данные не загружены — нажмите «Импорт данных»",'
-           '"Источник данных: "&sys_LastFile)', size=9, color=C["text2"])
+           '"Источник данных: "&IF(LEN(sys_LastFile)>62,LEFT(sys_LastFile,60)&"…",'
+           'sys_LastFile))', size=9, color=C["text2"])
     cv.image(1040, 972, assets.icon("ui_shield"), scale=20 / 48)
     cv.put((1066, 962, 1122, 996), "Доступ:", size=9, color=C["muted"])
-    cv.put((1122, 962, 1248, 996), "=cfg_Role", bold=True, size=9, color=C["text"])
+    cv.put((1122, 962, 1248, 996), "=cfg_Role", font=FONT_SEMI, size=9, color=C["text"],
+           shrink=True)
     cv.vline(1256, 964, 994, C["divider"])
     button(cv, 1268, 965, assets.button("exit"), "ExitApp")
 
     cv.build()
 
-    # --- формулы, которые удобнее писать после построения сетки
-    upd_r, upd_c, _, _ = cv.cell_range((1080, 48, 1352, 70))
+    header_cf(wb, ws, cv)
     helper_c = cv.n_cols + 1  # скрытые служебные столбцы справа от макета
-    elapsed = xl_rowcol_to_cell(upd_r, helper_c, row_abs=True, col_abs=True)
-    ws.write_formula(upd_r, helper_c, '=IF(N(sys_LastImport)=0,-1,NOW()-sys_LastImport)')
-    wb.define_name("ui_Elapsed", f"={_q(S_DASH)}!{elapsed}")
-    upd_fmt = cv.fmt({"bg": C["header"], "size": 9, "color": C["muted"], "align": "right"})
-    ws.write_formula(
-        upd_r, upd_c,
-        '=IF(N(sys_LastImport)=0,"Данные еще не загружались",'
-        '"Обновление: "&IF(NOW()-sys_LastImport<1/1440,"только что",'
-        'IF(NOW()-sys_LastImport<1/24,INT((NOW()-sys_LastImport)*1440)&" мин назад",'
-        'IF(NOW()-sys_LastImport<1,INT((NOW()-sys_LastImport)*24)&" ч "&'
-        'MOD(INT((NOW()-sys_LastImport)*1440),60)&" мин назад",'
-        'INT(NOW()-sys_LastImport)&" дн "&MOD(INT((NOW()-sys_LastImport)*24),24)&" ч назад"))))',
-        upd_fmt)
+    # весь макет — для подгонки масштаба под окно (modApp.FitDashboard)
+    wb.define_name("ui_Canvas", f"={_q(S_DASH)}!$A$1:"
+                                f"{xl_rowcol_to_cell(cv.n_rows - 1, cv.n_cols - 1, True, True)}")
 
     # служебные ячейки: зона/«ранняя дата» строк таблицы, состояние
     state_r = cv.cell_range(card1)[0]
@@ -656,17 +693,24 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
         return fmt_cache[key]
 
     for z in (1, 2, 3, 4):
-        for s, num in ((0, "0.0#"), (1, '0.0#"*"')):
+        for st, num in ((0, VAL_FMT), (1, VAL_FMT + '"*"')):
             ws.conditional_format(rng(value_c), {
-                "type": "formula", "criteria": f"=AND({zr}={z},{sr}={s})",
+                "type": "formula", "criteria": f"=AND({zr}={z},{sr}={st})",
                 "format": cf_fmt(ZONE_COLOR[z], num)})
-    for c in (value_c, status_c, zonecol_c, arrow_c):
+    for c in (value_c, status_c, zonecol_c):
         ws.conditional_format(rng(c), {"type": "formula", "criteria": f"={zr}=0",
                                        "format": cf_fmt(C["muted"])})
-    for c in (status_c, zonecol_c, arrow_c):
+    for c in (status_c, zonecol_c):
         for z in (2, 3, 4):
             ws.conditional_format(rng(c), {"type": "formula", "criteria": f"={zr}={z}",
                                            "format": cf_fmt(ZONE_COLOR[z])})
+    # стрелка ↑/↓ — цветом зоны, «—» (без изменений) — нейтральная
+    arrow_ref = xl_rowcol_to_cell(first, arrow_c)
+    for z in (1, 2, 3, 4):
+        ws.conditional_format(rng(arrow_c), {
+            "type": "formula",
+            "criteria": f'=AND({zr}={z},OR({arrow_ref}="↑",{arrow_ref}="↓"))',
+            "format": cf_fmt(ZONE_COLOR[z])})
 
     # состояние: цвет текста
     st_r, st_c, _, _ = cv.cell_range((212, 170, 392, 200))
@@ -675,20 +719,12 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
         for val, color in ((0, C["muted"]), (2, C["yellow"]), (3, C["red"]), (4, C["red"])):
             ws.conditional_format(r, c, r, c, {"type": "formula", "criteria": f"={state_ref}={val}",
                                                "format": cf_fmt(color)})
-    # индикатор свежести данных
-    dot_r, dot_c, _, _ = cv.cell_range((1352, 48, 1372, 70))
-    el = elapsed
-    for crit, color in ((f"=AND({el}>=0,{el}<1)", C["green"]), (f"=AND({el}>=1,{el}<3)", C["yellow"]),
-                        (f"={el}>=3", C["red"])):
-        ws.conditional_format(dot_r, dot_c, dot_r, dot_c, {"type": "formula", "criteria": crit,
-                                                           "format": cf_fmt(color)})
-
     ws.hide_gridlines(2)
     ws.hide_row_col_headers()
     ws.set_zoom(85)
     print_setup(ws, cv)
     sel_r, sel_c, _, _ = cv.cell_range((194, 92, 372, 126))
-    ws.set_selection(sel_r, sel_c, sel_r, sel_c)
+    ws.set_selection(0, 0, 0, 0)
     ws.set_tab_color(C["green"])
     return {"sel_cell": (sel_r, sel_c), "table_rows": table_cells}
 
@@ -712,9 +748,10 @@ def max_chart(wb):
     ch = wb.add_chart({"type": "line"})
     for r, name, color, dash in ((LIM_R, "Норматив", C["red"], "dash"),
                                  (YEL_R, "Желтая зона", C["yellow"], "dash"),
-                                 (GRN_R, "Зеленая зона", "#3E6B52", "round_dot")):
+                                 (GRN_R, "Зеленая зона", C["green"], "dash")):
         ch.add_series({"name": name, "categories": cats, "values": vals(r),
-                       "line": {"color": color, "width": 1.0, "dash_type": dash},
+                       "line": {"color": color, "width": 1.0, "dash_type": dash,
+                                "transparency": 40 if r == GRN_R else 0},
                        "marker": {"type": "none"}})
     ch.add_series({"name": "Максимум", "categories": cats, "values": vals(MAXDAY_R),
                    "line": {"color": C["green"], "width": 1.75},
@@ -724,7 +761,7 @@ def max_chart(wb):
                    "line": {"none": True},
                    "marker": {"type": "circle", "size": 6,
                               "fill": {"color": C["green"]}, "border": {"color": "#FFFFFF"}},
-                   "data_labels": {"value": True, "position": "above", "num_format": "0.0#",
+                   "data_labels": {"value": True, "position": "right", "num_format": "0.0#",
                                    "font": {"name": FONT, "size": 9, "bold": True,
                                             "color": C["green"]}}})
     axis_font = {"name": FONT, "size": 7.5, "color": C["muted"], "rotation": 0}
@@ -750,21 +787,22 @@ def max_chart(wb):
 # ----------------------------------------------------------------------------
 def build_placeholder(wb, ws, assets: Assets, active: int, title: str, text: str) -> None:
     cv = Canvas(wb, ws, W, 960)
-    draw_header(cv, assets)
+    draw_header(cv, assets, NAV[active][3])
     draw_nav(cv, assets, active)
     p = (126, 92, 1380, 948)
     cv.fill(p, C["panel"])
     cv.frame(p, C["border"])
-    cv.put((150, 110, 1360, 150), title, bold=True, size=14, color=C["text"])
+    cv.put((150, 110, 1360, 150), title, font=FONT_SEMI, size=14, color=C["text"])
     cv.hline(150, 1360, 150, C["divider"])
     cv.image(753 - 48, 380, assets.icon(NAV[active][2] + "_normal"), scale=1.5)
-    cv.put((300, 490, 1206, 530), "Раздел в разработке", bold=True, size=16, color=C["text"],
-           align="center")
+    cv.put((300, 490, 1206, 530), "Раздел в разработке", font=FONT_SEMI, size=16,
+           color=C["text"], align="center")
     cv.put((300, 530, 1206, 600), text, size=10, color=C["muted"], align="center", wrap=True,
            valign="top")
     cv.put((660, 620, 846, 652), "← К СВОДКЕ", bold=True, size=9.5, color=C["green"],
            align="center", url=f"internal:{_q(S_DASH)}!A1", url_tip="Перейти на сводку")
     cv.build()
+    header_cf(wb, ws, cv)
     ws.hide_gridlines(2)
     ws.hide_row_col_headers()
     ws.set_zoom(85)
@@ -778,27 +816,36 @@ def build_placeholder(wb, ws, assets: Assets, active: int, title: str, text: str
 def build_settings(wb, ws, assets: Assets) -> None:
     h = 548 + 34 + 30 + LOG_ROWS * 22 + 24
     cv = Canvas(wb, ws, W, h)
-    draw_header(cv, assets)
+    draw_header(cv, assets, "shSettings")
     draw_nav(cv, assets, active=5, bottom=h - 12)
 
     lab = dict(size=9.5, color=C["text2"])
-    inp = dict(size=10.5, bold=True, color=C["text"], bg=C["input"], align="center", locked=False)
+    inp = dict(size=10.5, font=FONT_SEMI, color=C["text"], bg=C["input"], align="center",
+               locked=False)
 
     p = (126, 92, 700, 340)
     cv.fill(p, C["panel"])
     cv.frame(p, C["border"])
-    cv.put((140, 96, 690, 128), "ПОРОГОВЫЕ ЗНАЧЕНИЯ, ppm", bold=True, size=10, color=C["text2"])
-    rows = [("Зеленая зона — до (включительно)", "cfg_Green", 1.5, C["green"]),
-            ("Желтая зона — до (включительно)", "cfg_Yellow", 2.3, C["yellow"]),
-            ("Норматив (предельное значение)", "cfg_Limit", 3.0, C["red"])]
-    for i, (t, name, v, col) in enumerate(rows):
+    cv.put((140, 96, 690, 128), "ПОРОГОВЫЕ ЗНАЧЕНИЯ, ppm", font=FONT_SEMI, size=10,
+           color=C["text2"])
+    # порядок границ: зеленая < желтая <= норматив
+    rows = [("Зеленая зона — до (включительно)", "cfg_Green", 1.5, C["green"],
+             "=AND(ISNUMBER(cfg_Green),cfg_Green>=0,cfg_Green<cfg_Yellow)",
+             "Граница зеленой зоны должна быть не меньше 0 и меньше границы желтой зоны."),
+            ("Желтая зона — до (включительно)", "cfg_Yellow", 2.3, C["yellow"],
+             "=AND(ISNUMBER(cfg_Yellow),cfg_Yellow>cfg_Green,cfg_Yellow<=cfg_Limit)",
+             "Граница желтой зоны должна быть больше зеленой и не больше норматива."),
+            ("Норматив (предельное значение)", "cfg_Limit", 3.0, C["red"],
+             "=AND(ISNUMBER(cfg_Limit),cfg_Limit>=cfg_Yellow)",
+             "Норматив должен быть не меньше границы желтой зоны.")]
+    for i, (t, name, v, col, rule, msg) in enumerate(rows):
         y = 136 + i * 40
-        cv.put((140, y, 150, y + 30), "■", size=10, color=col)
-        cv.put((152, y, 480, y + 30), t, **lab)
+        cv.put((140, y, 152, y + 30), "■", size=10, color=col)
+        cv.put((158, y, 480, y + 30), t, **lab)
         cv.frame((490, y + 2, 580, y + 28), C["divider"])
         cv.put((490, y + 2, 580, y + 28), v, num="0.0#", name=name,
-               validation={"validate": "decimal", "criteria": "between", "minimum": 0,
-                           "maximum": 1000, "error_message": "Введите число от 0 до 1000."},
+               validation={"validate": "custom", "value": rule,
+                           "error_title": "Пороговые значения", "error_message": msg},
                **inp)
         cv.put((586, y, 640, y + 30), "ppm", size=9, color=C["muted"])
     cv.put((140, 262, 690, 334),
@@ -809,9 +856,8 @@ def build_settings(wb, ws, assets: Assets) -> None:
     p = (712, 92, 1380, 340)
     cv.fill(p, C["panel"])
     cv.frame(p, C["border"])
-    cv.put((726, 96, 1370, 128), "ОФОРМЛЕНИЕ", bold=True, size=10, color=C["text2"])
-    texts = [("Название организации", "cfg_Company", "TATNEFT"),
-             ("Заголовок", "cfg_Title", "СОДЕРЖАНИЕ ЛЕГКОЛЕТУЧИХ ХЛОРОРГАНИЧЕСКИХ СОЕДИНЕНИЙ ПО СИКН"),
+    cv.put((726, 96, 1370, 128), "ОФОРМЛЕНИЕ", font=FONT_SEMI, size=10, color=C["text2"])
+    texts = [("Заголовок", "cfg_Title", "СОДЕРЖАНИЕ ЛЕГКОЛЕТУЧИХ ХЛОРОРГАНИЧЕСКИХ СОЕДИНЕНИЙ ПО СИКН"),
              ("Подзаголовок", "cfg_Subtitle", "ОПЕРАТИВНАЯ СВОДКА"),
              ("Доступ (роль)", "cfg_Role", "ДИСПЕТЧЕР")]
     for i, (t, name, v) in enumerate(texts):
@@ -824,13 +870,13 @@ def build_settings(wb, ws, assets: Assets) -> None:
     p = (126, 352, 1380, 536)
     cv.fill(p, C["panel"])
     cv.frame(p, C["border"])
-    cv.put((140, 356, 1000, 388), "ДАННЫЕ", bold=True, size=10, color=C["text2"])
+    cv.put((140, 356, 1000, 388), "ДАННЫЕ", font=FONT_SEMI, size=10, color=C["text2"])
     info = [
         ("Последняя загрузка", None, "sys_LastImport", "dd.mm.yyyy hh:mm"),
         ("Файл", None, "sys_LastFile", "@"),
         ("Режим загрузки", None, "sys_LastMode", "@"),
-        ("Объектов в базе", "=COUNTA(db_Names)", None, "0"),
-        ("Значений в базе", "=COUNT(db_Vals)", None, "#,##0"),
+        ("Объектов в базе", f"=COUNTA({_q(S_DB)}!$B$1:$ZZ$1)", None, "0"),
+        ("Значений в базе", f"=COUNT({_q(S_DB)}!$B$3:$ZZ${2 + DB_ROWS})", None, "#,##0"),
         ("Период данных", '=IF(c_FirstDate="","—",RIGHT("0"&DAY(c_FirstDate),2)&"."&'
                           'RIGHT("0"&MONTH(c_FirstDate),2)&"."&YEAR(c_FirstDate)&" – "&'
                           'RIGHT("0"&DAY(c_LastDate),2)&"."&RIGHT("0"&MONTH(c_LastDate),2)&"."&'
@@ -842,8 +888,8 @@ def build_settings(wb, ws, assets: Assets) -> None:
         y = 396 + row * 30
         cv.put((x, y, x + 170, y + 28), t, size=9, color=C["muted"])
         extra = {"name": name} if name else {}
-        cv.put((x + 170, y, x + 430, y + 28), frm, num=num, bold=True, size=9.5,
-               color=C["text"], align="left", **extra)
+        cv.put((x + 170, y, x + 430, y + 28), frm, num=num, font=FONT_SEMI, size=9.5,
+               color=C["text"], align="left", shrink=True, **extra)
     button(cv, 1182, 398, assets.button("import"), "ImportData")
     button(cv, 1182, 444, assets.button("clear"), "ClearDatabase")
     cv.put((140, 490, 1366, 530),
@@ -856,7 +902,8 @@ def build_settings(wb, ws, assets: Assets) -> None:
     p = (126, y0, 1380, h - 12)
     cv.fill(p, C["panel"])
     cv.frame(p, C["border"])
-    cv.put((140, y0 + 2, 1000, y0 + 32), "ЖУРНАЛ ЗАГРУЗОК", bold=True, size=10, color=C["text2"])
+    cv.put((140, y0 + 2, 1000, y0 + 32), "ЖУРНАЛ ЗАГРУЗОК", font=FONT_SEMI, size=10,
+           color=C["text2"])
     lcols = [(140, 270, "Дата и время", "dd.mm.yyyy hh:mm", "center"),
              (270, 560, "Файл", "@", "left"),
              (560, 700, "Режим", "@", "left"),
@@ -869,8 +916,8 @@ def build_settings(wb, ws, assets: Assets) -> None:
     hy = y0 + 34
     cv.fill((140, hy, 1366, hy + 30), C["panel_hdr"])
     for j, (x0, x1, t, num, al) in enumerate(lcols):
-        cv.put((x0, hy, x1, hy + 30), t, bold=True, size=8, color=C["text2"], align="center",
-               name=f"log_C{j + 1}")
+        cv.put((x0, hy, x1, hy + 30), t, font=FONT_SEMI, size=8, color=C["text2"],
+               align="center", name=f"log_C{j + 1}")
         for i in range(LOG_ROWS):
             y = hy + 30 + i * 22
             cv.put((x0, y, x1, y + 22), None, size=8.5, color=C["text"], num=num, align=al,
@@ -878,6 +925,7 @@ def build_settings(wb, ws, assets: Assets) -> None:
     for i in range(LOG_ROWS):
         cv.hline(140, 1366, hy + 30 + (i + 1) * 22, C["line"])
     cv.build()
+    header_cf(wb, ws, cv)
     ws.hide_gridlines(2)
     ws.hide_row_col_headers()
     ws.set_zoom(85)
@@ -892,8 +940,8 @@ def build_settings(wb, ws, assets: Assets) -> None:
 # ----------------------------------------------------------------------------
 # Постобработка: макросы фигур-кнопок
 # ----------------------------------------------------------------------------
-_SP_RE = re.compile(r'<xdr:(sp|pic) macro=""( textlink="[^"]*")?>(\s*<xdr:nv(?:Sp|Pic)Pr>\s*'
-                    r'<xdr:cNvPr [^>]*descr="btn:(\w+)")')
+_SP_RE = re.compile(r'<xdr:(sp|pic)(?: macro="[^"]*")?( textlink="[^"]*")?>(\s*<xdr:nv(?:Sp|Pic)Pr>'
+                    r'\s*<xdr:cNvPr [^>]*descr="btn:(\w+)")')
 
 
 def _patch_drawing(xml: str) -> str:
@@ -919,7 +967,10 @@ def postprocess(path: str) -> None:
         for item in zin.infolist():
             data = zin.read(item.filename)
             if item.filename.startswith("xl/drawings/drawing") and item.filename.endswith(".xml"):
-                data = _patch_drawing(data.decode("utf-8")).encode("utf-8")
+                xml = _patch_drawing(data.decode("utf-8"))
+                n_btn = xml.count('descr="btn:')
+                assert xml.count('macro="[0]!') == n_btn, f"macro patch failed in {item.filename}"
+                data = xml.encode("utf-8")
             zout.writestr(item, data)
     os.replace(tmp, path)
 

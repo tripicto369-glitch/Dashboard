@@ -31,7 +31,7 @@ DIST = os.path.join(ROOT, "dist")
 DASHBOARD = os.path.join(DIST, "Дашборд_ЛХОС.xlsm")
 
 # кодовые имена листов (совпадают с dashboard.build_workbook)
-SHEET_CODES = [code for *_x, code in NAV] + ["shDB", "shCalc"]
+SHEET_CODES = [n[3] for n in NAV] + ["shDB", "shCalc"]
 
 
 def _read(name: str) -> str:
@@ -52,7 +52,47 @@ def vba_modules() -> list[VbaModule]:
     return mods
 
 
-def build_dashboard(path: str = DASHBOARD) -> str:
+def formula_results(path: str) -> dict:
+    """Результаты формул пустой книги, вычисленные LibreOffice (если он установлен).
+
+    xlsxwriter не вычисляет формулы и сохраняет у них результат 0, а Excel до
+    пересчета (например, в режиме защищенного просмотра) показывает именно
+    сохраненные результаты. Поэтому книга собирается дважды: второй раз — с
+    результатами из первого прохода.
+    """
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "tests"))
+        from lo_harness import LibreOffice  # noqa: E402
+    except Exception as exc:  # нет LibreOffice/uno — собираем без кэша
+        print("  (результаты формул не вычислены: нет LibreOffice/uno:", exc, ")")
+        return {}
+    cache: dict = {}
+    with LibreOffice() as lo:
+        lo.set_config("/org.openoffice.Office.Calc/Formula/Load", OOXMLRecalcMode=0)
+        lo.set_config("/org.openoffice.Setup/L10N", ooSetupSystemLocale="ru-RU")
+        doc = lo.open(path, macros=False)
+        doc.recalc()
+        sheets = doc.doc.Sheets
+        for i in range(sheets.Count):
+            sh = sheets.getByIndex(i)
+            cells = sh.queryContentCells(16).getCells().createEnumeration()  # 16 = FORMULA
+            while cells.hasMoreElements():
+                cell = cells.nextElement()
+                a = cell.getCellAddress()
+                if cell.getError():
+                    v = cell.getString() or "#N/A"
+                elif cell.FormulaResultType2 == 2:  # STRING
+                    v = cell.getString()
+                else:
+                    v = cell.getValue()
+                cache[(sh.Name, a.Row, a.Column)] = v
+        doc.close()
+    return cache
+
+
+def build_dashboard(path: str = DASHBOARD, cache_results: bool = True) -> str:
+    from lhos import canvas
+
     os.makedirs(os.path.dirname(path), exist_ok=True)
     render_all(ICONS_DIR)
     render_states(ICONS_DIR)
@@ -61,7 +101,13 @@ def build_dashboard(path: str = DASHBOARD) -> str:
         bin_path = os.path.join(tmp, "vbaProject.bin")
         with open(bin_path, "wb") as f:
             f.write(build_vba_project(vba_modules()))
+        canvas.FORMULA_CACHE.clear()
         build_workbook(path, ICONS_DIR, bin_path)
+        if cache_results:
+            canvas.FORMULA_CACHE.update(formula_results(path))
+            if canvas.FORMULA_CACHE:
+                build_workbook(path, ICONS_DIR, bin_path)
+            canvas.FORMULA_CACHE.clear()
     return path
 
 
@@ -70,8 +116,10 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--no-mock", action="store_true", help="не пересоздавать мокап-данные")
     ap.add_argument("-o", "--output", default=DASHBOARD, help="путь к .xlsm")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="не вычислять результаты формул через LibreOffice")
     args = ap.parse_args()
-    print("Дашборд:", build_dashboard(args.output))
+    print("Дашборд:", build_dashboard(args.output, cache_results=not args.no_cache))
     if not args.no_mock:
         from lhos.mockdata import make_mock
         main_p = os.path.join(DIST, "Мокап_ЛХОС_2026.xlsx")

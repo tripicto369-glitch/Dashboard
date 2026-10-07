@@ -10,11 +10,18 @@ formulas).  The scenario:
    visible texts of «Сводка» for TODAY (real date) and for several months
    chosen through ``sel_Month`` (incl. February with "н/д", March with the
    3.2 exceedance on 17.03 and the "0,45" text value, September with a blank
-   last day);
+   last day); the rendered value column (PDF text) shows "*" for stale values;
+   the «Обновление: …» label for several ages of the last import;
+   other "today" dates (1st of a month, past month, exceedance day, "н/д" day)
+   by replacing c_Today with a constant in the working copy;
 3. threshold changes on «Настройки» re-zone everything;
 4. append import (mode 2) of the update file -> counts, new object, the
    conflicting value is NOT overwritten; mode 0 on a non-empty base appends;
 5. replace import (mode 1) of the main file -> base equals the main file again;
+   error paths (missing file, file without values, the dashboard itself) leave
+   the base untouched; synthetic sources (December 2025 appended before the
+   base, reordered columns, other spelling of a name, duplicate date rows,
+   unmerged "Дата" header, text values) and a small replace (no stray cells);
 6. ClearDatabaseSilent -> empty state again;
 7. the import log on «Настройки» has one row per import, newest first.
 
@@ -23,7 +30,8 @@ not depend on the generated grid.  All mismatches are collected and printed;
 the run fails if there is any.
 
 Run:  ``python3 -I tests/test_integration.py``  (or via pytest).  Set
-``LHOS_E2E_OUT=<dir>`` to keep the working copy and a JSON with mismatches.
+``LHOS_E2E_OUT=<dir>`` to keep the working copy and a JSON with mismatches,
+``LHOS_XLSM=<path>`` to test another build of the workbook.
 """
 
 from __future__ import annotations
@@ -49,15 +57,20 @@ if not HAVE_LO and "pytest" in sys.modules:  # pragma: no cover
 
     pytest.skip("LibreOffice/uno not available", allow_module_level=True)
 
-import openpyxl  # noqa: E402
+import openpyxl
+import oracle as O
 
-import oracle as O  # noqa: E402
-
-XLSM = ROOT / "dist" / "Дашборд_ЛХОС.xlsm"
+XLSM = Path(os.environ.get("LHOS_XLSM") or ROOT / "dist" / "Дашборд_ЛХОС.xlsm")
 MAIN = ROOT / "dist" / "Мокап_ЛХОС_2026.xlsx"
 UPD = ROOT / "dist" / "Мокап_ЛХОС_2026_дополнение.xlsx"
 
 EPOCH = dt.date(1899, 12, 30)
+EPOCH_DT = dt.datetime(1899, 12, 30)  # noqa: DTZ001 - Excel serials are local, naive
+
+
+def now_local() -> dt.datetime:
+    """Local wall-clock time, as Excel's NOW() sees it (naive on purpose)."""
+    return dt.datetime.now()  # noqa: DTZ005
 TOL = 1e-9
 
 
@@ -113,10 +126,10 @@ def discover_layout(path: Path) -> dict:
         "green": find(lambda f: f == "=c_CntGreen", "green")[0],
         "yellow": find(lambda f: f == "=c_CntYellow", "yellow")[0],
         "red": find(lambda f: f == "=c_CntRed", "red")[0],
-        "total": sorted(find(lambda f: f == "=c_ObjCount", "total"),
-                        key=lambda a: int(re.sub(r"\D", "", a)))[0],
-        "donut_total": sorted(find(lambda f: f == "=c_ObjCount", "total"),
-                              key=lambda a: int(re.sub(r"\D", "", a)))[-1],
+        "total": min(find(lambda f: f == "=c_ObjCount", "total"),
+                     key=lambda a: int(re.sub(r"\D", "", a))),
+        "donut_total": max(find(lambda f: f == "=c_ObjCount", "total"),
+                           key=lambda a: int(re.sub(r"\D", "", a))),
         "total_sub": find(lambda f: "c_CntNoData" in f, "no data")[0],
         "title": find(lambda f: "c_MonthLabel" in f, "title")[0],
         "note": find(lambda f: "c_StaleCount" in f, "note")[0],
@@ -257,9 +270,9 @@ def calc_param(doc, L, name):
 # Comparisons
 # ---------------------------------------------------------------------------
 
-def check_view(doc, L, v: O.View, ck: Checker):
+def check_view(doc, L, v: O.View, ck: Checker, real_today: bool = True):
     """Compare «Расчет» and the visible texts of «Сводка» with the oracle view."""
-    P = lambda n: calc_param(doc, L, n)  # noqa: E731
+    P = lambda n: calc_param(doc, L, n)
     ck.eq("c_MonthStart", from_serial(P("MonthStart")), v.month_start)
     ck.eq("c_MonthEnd", from_serial(P("MonthEnd")), v.month_end)
     ck.eq("c_RefDate", from_serial(P("RefDate")), v.ref_date)
@@ -345,7 +358,8 @@ def check_view(doc, L, v: O.View, ck: Checker):
     for key, want in exp.items():
         addr = L["dash"][key]
         ck.eq(f"Сводка {key} ({addr})", doc.get_string("Сводка", addr), want)
-    ck.eq("Сводка today", doc.get_string("Сводка", L["dash"]["today"]), v.today.strftime("%d.%m.%Y"))
+    if real_today:  # the header always shows the real date (TODAY())
+        ck.eq("Сводка today", doc.get_string("Сводка", L["dash"]["today"]), v.today.strftime("%d.%m.%Y"))
     texts = O.table_texts(v)
     c = L["cols"]
     for k, r in enumerate(L["rows"]):
@@ -385,10 +399,17 @@ def read_db(doc):
             for j, x in enumerate(row):
                 if x != "":
                     vals[(dates[i], names[j])] = x
-    # anything outside the block?
+    # anything outside the block (rows below, header/values right of the objects)?
     extra = s.getCellRangeByName(f"A{3 + len(dates)}:CV{3 + len(dates) + 5}").getDataArray()
     stray = any(x != "" for row in extra for x in row)
+    right = s.getCellRangeByName(f"{_col(2 + len(names))}1:CV{max(3, 2 + len(dates))}").getDataArray()
+    stray = stray or any(x != "" for row in right for x in row)
     return names, groups, vals, dates, stray
+
+
+def _col(n: int) -> str:
+    from openpyxl.utils import get_column_letter
+    return get_column_letter(n)
 
 
 def check_db(doc, db: O.Db, ck: Checker):
@@ -401,7 +422,7 @@ def check_db(doc, db: O.Db, ck: Checker):
             if vals.get(k) is None or db.values.get(k) is None or abs(vals[k] - db.values[k]) > 1e-12}
     ck.true("БД values equal oracle", not diff,
             str(sorted(((d.isoformat(), n), a, e) for (d, n), (a, e) in diff.items())[:10]))
-    ck.true("БД no stray rows below the data", not stray)
+    ck.true("БД no stray cells below / right of the data", not stray)
 
 
 def parse_report(text: str) -> dict:
@@ -460,8 +481,8 @@ def check_sys(doc, L, ck: Checker, *, file_name, mode_text, since: dt.datetime |
     else:
         ok = isinstance(last, float)
         if ok:
-            ts = dt.datetime(1899, 12, 30) + dt.timedelta(days=last)
-            ok = since - dt.timedelta(minutes=2) <= ts <= dt.datetime.now() + dt.timedelta(minutes=2)
+            ts = EPOCH_DT + dt.timedelta(days=last)
+            ok = since - dt.timedelta(minutes=2) <= ts <= now_local() + dt.timedelta(minutes=2)
         ck.true("sys_LastImport ~ now", ok, str(last))
     ck.eq("sys_LastFile", cell_value(doc, "Настройки", s["sys_LastFile"]), file_name)
     ck.eq("sys_LastMode", cell_value(doc, "Настройки", s["sys_LastMode"]), mode_text)
@@ -515,6 +536,135 @@ def set_cfg(doc, L, cfg: O.Cfg):
     doc.recalc()
 
 
+def elapsed_text(delta: dt.timedelta) -> str:
+    """Expected «Обновление: …» text for the time since the last import."""
+    mins = int(delta.total_seconds() // 60)
+    if delta < dt.timedelta(minutes=1):
+        return "Обновление: только что"
+    if delta < dt.timedelta(hours=1):
+        return f"Обновление: {mins} мин назад"
+    if delta < dt.timedelta(days=1):
+        return f"Обновление: {mins // 60} ч {mins % 60} мин назад"
+    return f"Обновление: {delta.days} дн {int(delta.total_seconds() // 3600) % 24} ч назад"
+
+
+def check_elapsed(doc, L, ck: Checker):
+    addr = L["sys"]["sys_LastImport"]
+    keep = doc.cell("Настройки", addr).getValue()
+    for delta in (dt.timedelta(seconds=20), dt.timedelta(minutes=5, seconds=20),
+                  dt.timedelta(hours=2, minutes=7, seconds=20),
+                  dt.timedelta(days=3, hours=4, minutes=10, seconds=20)):
+        stamp = now_local() - delta
+        doc.cell("Настройки", addr).setValue(
+            (stamp - EPOCH_DT).total_seconds() / 86400)
+        doc.recalc()
+        ck.eq(f"elapsed label for {delta}", doc.get_string("Сводка", L["dash"]["updated"]),
+              elapsed_text(delta))
+        el = cell_value(doc, "Сводка", L["names"]["ui_Elapsed"].split("!")[1].replace("$", ""))
+        ck.eq(f"ui_Elapsed for {delta}", el, delta.total_seconds() / 86400, tol=5 / 86400)
+    doc.cell("Настройки", addr).setValue(keep)
+    doc.recalc()
+
+
+def check_pdf_values(doc, v: O.View, ck: Checker, work: Path, tag: str):
+    """Value column as rendered (conditional number format adds "*" when stale)."""
+    import subprocess
+    if not shutil.which("pdftotext"):
+        return
+    pdf = doc.export_pdf(work / f"{tag}.pdf")
+    txt = subprocess.run(["pdftotext", "-layout", "-f", "1", "-l", "1", str(pdf), "-"],
+                         capture_output=True, text=True, check=True).stdout
+    for k, o in enumerate(v.sorted[:O.TABLE_ROWS]):
+        want = "—" if o.value is None else O.fmt_num(o.value) + ("*" if o.stale else "")
+        m = re.search(rf"(?m)^\s*(?:\S+\s+)?{k + 1}\s+{re.escape(o.name)}\s+(\S+)", txt)
+        ck.eq(f"rendered value row {k + 1} {o.name}", m.group(1) if m else None, want)
+
+
+def simulate_today(doc, L, day: dt.date | None):
+    """Replace c_Today (=TODAY()) by a constant date in the working copy."""
+    c = doc.cell("Расчет", L["calc"]["Today"])
+    if day is None:
+        c.setFormula("=TODAY()")
+    else:
+        c.setValue(serial(day))
+    doc.recalc()
+
+
+def write_source(path: Path, sheets: list):
+    """sheets: [(title, header_kind, groups, names, rows)] where header_kind is
+    "merged" (Дата in B4:B5, groups row 4, names row 5) or "single" (Дата and
+    names in row 3); rows = [(date, [values...])]."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for title, kind, groups, names, rows in sheets:
+        ws = wb.create_sheet(title)
+        if kind is None:
+            ws["A2"] = "Показатель"
+            ws["B3"] = 1.5
+            continue
+        if kind == "merged":
+            ws.merge_cells("B4:B5")
+            ws["B4"] = "Дата"
+            hdr, grow = 5, 4
+        else:
+            ws["B3"] = "Дата"
+            hdr, grow = 3, None
+        for j, nm in enumerate(names):
+            ws.cell(hdr, 3 + j, nm)
+            if grow and groups:
+                ws.cell(grow, 3 + j, groups[j])
+        for i, (d, vals) in enumerate(rows):
+            ws.cell(hdr + 1 + i, 2, EPOCH_DT + (d - EPOCH)).number_format = "dd.mm.yyyy"
+            for j, x in enumerate(vals):
+                if x is not None:
+                    ws.cell(hdr + 1 + i, 3 + j, x)
+    wb.save(path)
+    return path
+
+
+def edge_sources(work: Path) -> dict:
+    D = dt.date
+    a = write_source(work / "edge_append.xlsx", [
+        ("Декабрь 2025", "merged", ["Нефть тип А", "Новые"], ["СИКН №301", "Новый-1"], [
+            (D(2025, 12, 29), [0.4, 1.9]),
+            (D(2025, 12, 30), [" 1,25 ", "н/д"]),
+            (D(2025, 12, 31), [0.9, "-"]),
+            (D(2025, 12, 31), [0.45, 2.6]),          # duplicate date row: last wins
+        ]),
+        ("Свод", None, None, None, None),
+        # other column order, other spelling of an existing object, a value that
+        # equals the base and one that differs from it
+        ("Январь", "single", None, ["Новый-1", "сикн  №304", "СИКН №301"], [
+            (D(2026, 1, 1), [0.3, "__SAME304__", "__DIFF301__"]),
+            (D(2026, 1, 2), [0.35, None, None]),
+        ]),
+    ])
+    b = write_source(work / "edge_small.xlsx", [
+        ("Август", "merged", ["Г1", "Г1", "Г2"], ["Узел-А", "Узел-Б", "Узел-В"], [
+            (D(2026, 8, 10), [0.5, 1.6, 2.4]),
+            (D(2026, 8, 11), [0.6, 1.7, 3.1]),
+            (D(2026, 8, 12), [0.7, None, 0.2]),
+        ]),
+    ])
+    c = write_source(work / "edge_novalues.xlsx", [
+        ("Ноябрь", "merged", ["Г"], ["Объект"], [(D(2026, 11, 1), [None]), (D(2026, 11, 2), ["н/д"])]),
+    ])
+    return {"append": a, "small": b, "novalues": c}
+
+
+def patch_edge_append(path: Path, base: O.Db):
+    """Fill the placeholders with the base value (same) and base + 0.5 (conflict)."""
+    wb = openpyxl.load_workbook(path)
+    ws = wb["Январь"]
+    for row in ws.iter_rows():
+        for c in row:
+            if c.value == "__SAME304__":
+                c.value = base.values[(dt.date(2026, 1, 1), "СИКН №304")]
+            elif c.value == "__DIFF301__":
+                c.value = round(base.values[(dt.date(2026, 1, 1), "СИКН №301")] + 0.5, 2)
+    wb.save(path)
+
+
 # ---------------------------------------------------------------------------
 # Scenario
 # ---------------------------------------------------------------------------
@@ -528,7 +678,7 @@ def run(out_dir: Path | None = None) -> Checker:
     shutil.copy(XLSM, book)
     L = discover_layout(book)
     ck = Checker()
-    today = dt.date.today()
+    today = dt.date.today()  # noqa: DTZ011 - must match TODAY() in the workbook
     src_main = O.read_source(MAIN)
     src_upd = O.read_source(UPD)
     default = O.Cfg()
@@ -551,7 +701,7 @@ def run(out_dir: Path | None = None) -> Checker:
 
         # 2. first import, mode 0 --------------------------------------------
         ck.ctx = "import main mode 0"
-        t0 = dt.datetime.now().replace(microsecond=0)
+        t0 = now_local().replace(microsecond=0)
         res = doc.run_macro("modImport", "ImportFileSilent", (str(MAIN), 0))
         doc.recalc()
         db, rep = O.import_source(None, src_main, O.MODE_AUTO)
@@ -567,16 +717,38 @@ def run(out_dir: Path | None = None) -> Checker:
         check_view(doc, L, O.compute(db, today, O.month_start(today if db.first <= today <= db.last
                                                                else db.last)), ck)
 
+        check_pdf_values(doc, O.compute(db, today, O.month_start(today if db.first <= today <= db.last
+                                                                  else db.last)), ck, work, "oct")
+        ck.ctx = "elapsed label"
+        check_elapsed(doc, L, ck)
+
         # 3. other months via sel_Month --------------------------------------
         for m in (2, 3, 9, 1, 10):
             ms = dt.date(2026, m, 1)
             set_month(doc, L, O.month_label(ms))
             ck.ctx = f"main, sel={O.month_label(ms)}"
             check_view(doc, L, O.compute(db, today, ms), ck)
+        set_month(doc, L, "Сентябрь 2026")
+        ck.ctx = "main, sel=Сентябрь 2026 (rendered)"
+        check_pdf_values(doc, O.compute(db, today, dt.date(2026, 9, 1)), ck, work, "sep")
         # an invalid selection falls back to the default month
         set_month(doc, L, "Ноябрь 2026")
         ck.ctx = "main, sel=Ноябрь 2026 (not in list)"
         check_view(doc, L, O.compute(db, today, None), ck)
+        set_month(doc, L, O.month_label(today))
+
+        # 3b. other "today" dates (c_Today replaced by a constant in the copy) --
+        for fake, sel in ((dt.date(2026, 10, 1), 10), (dt.date(2026, 10, 2), 10),
+                          (dt.date(2026, 10, 6), 10), (dt.date(2026, 10, 20), 10),
+                          (dt.date(2026, 11, 1), 10), (dt.date(2026, 11, 1), None),
+                          (dt.date(2026, 3, 17), 3), (dt.date(2026, 3, 18), 3),
+                          (dt.date(2026, 3, 1), 3), (dt.date(2026, 2, 10), 2)):
+            simulate_today(doc, L, fake)
+            set_month(doc, L, O.month_label(dt.date(2026, sel, 1)) if sel else "")
+            ck.ctx = f"main, simulated today={fake}, sel={sel}"
+            check_view(doc, L, O.compute(db, fake, dt.date(2026, sel, 1) if sel else None), ck,
+                       real_today=False)
+        simulate_today(doc, L, None)
         set_month(doc, L, O.month_label(today))
 
         # 4. thresholds -------------------------------------------------------
@@ -592,7 +764,7 @@ def run(out_dir: Path | None = None) -> Checker:
 
         # 5. append import (mode 2) -------------------------------------------
         ck.ctx = "append update mode 2"
-        t0 = dt.datetime.now().replace(microsecond=0)
+        t0 = now_local().replace(microsecond=0)
         res = doc.run_macro("modImport", "ImportFileSilent", (str(UPD), 2))
         doc.recalc()
         db2, rep2 = O.import_source(db, src_upd, O.MODE_APPEND)
@@ -629,7 +801,7 @@ def run(out_dir: Path | None = None) -> Checker:
 
         # 7. replace import (mode 1) ------------------------------------------
         ck.ctx = "replace main mode 1"
-        t0 = dt.datetime.now().replace(microsecond=0)
+        t0 = now_local().replace(microsecond=0)
         res = doc.run_macro("modImport", "ImportFileSilent", (str(MAIN), 1))
         doc.recalc()
         db4, rep4 = O.import_source(db3, src_main, O.MODE_REPLACE)
@@ -651,6 +823,49 @@ def run(out_dir: Path | None = None) -> Checker:
         res = doc.run_macro("modImport", "ImportFileSilent", (str(work / "nope.xlsx"), 2))
         ck.true("missing file -> ERR", str(res).startswith("ERR"), str(res)[:200])
         check_db(doc, db4, ck)
+        edges = edge_sources(work)
+        res = doc.run_macro("modImport", "ImportFileSilent", (str(edges["novalues"]), 1))
+        ck.true("file without values -> ERR", str(res).startswith("ERR"), str(res)[:200])
+        check_db(doc, db4, ck)
+        res = doc.run_macro("modImport", "ImportFileSilent", (str(book), 1))
+        ck.true("the dashboard itself -> ERR", str(res).startswith("ERR"), str(res)[:200])
+        check_db(doc, db4, ck)
+
+        # 8b. edge-case source files -------------------------------------------
+        ck.ctx = "edge append (Dec 2025, reordered columns, spelling, duplicates)"
+        patch_edge_append(edges["append"], db4)
+        src_e = O.read_source(edges["append"])
+        res = doc.run_macro("modImport", "ImportFileSilent", (str(edges["append"]), 2))
+        doc.recalc()
+        db5, rep5 = O.import_source(db4, src_e, O.MODE_APPEND)
+        check_report(res, rep5, src_e, ck)
+        check_db(doc, db5, ck)
+        log_expect.insert(0, ("Добавление новых", src_e.file_name, rep5.total, rep5.added,
+                              rep5.same, rep5.conflicts, rep5.obj_count))
+        for sel in (dt.date(2025, 12, 1), dt.date(2026, 1, 1)):
+            set_month(doc, L, O.month_label(sel))
+            ck.ctx = f"edge append, sel={O.month_label(sel)}"
+            check_view(doc, L, O.compute(db5, today, sel), ck)
+
+        ck.ctx = "edge replace with a small file"
+        src_s = O.read_source(edges["small"])
+        res = doc.run_macro("modImport", "ImportFileSilent", (str(edges["small"]), 1))
+        doc.recalc()
+        db6, rep6 = O.import_source(db5, src_s, O.MODE_REPLACE)
+        check_report(res, rep6, src_s, ck)
+        check_db(doc, db6, ck)
+        log_expect.insert(0, ("Полная загрузка", src_s.file_name, rep6.total, rep6.added, 0, 0,
+                              rep6.obj_count))
+        sel6 = today if db6.first <= today <= db6.last else db6.last
+        ck.eq("sel_Month after small replace", doc.get_string("Сводка", L["dash"]["sel"]),
+              O.month_label(sel6))
+        ck.ctx = "edge small, default month"
+        check_view(doc, L, O.compute(db6, today, O.month_start(sel6)), ck)
+        for fake in (dt.date(2026, 8, 11), dt.date(2026, 8, 12), dt.date(2026, 8, 13)):
+            simulate_today(doc, L, fake)
+            ck.ctx = f"edge small, simulated today={fake}"
+            check_view(doc, L, O.compute(db6, fake, dt.date(2026, 8, 1)), ck, real_today=False)
+        simulate_today(doc, L, None)
 
         # 9. clear -------------------------------------------------------------
         ck.ctx = "clear"

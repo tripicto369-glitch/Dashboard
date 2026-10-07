@@ -35,7 +35,6 @@ import datetime as dt
 import math
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Optional
 
 import openpyxl
 
@@ -61,7 +60,7 @@ def clean(v) -> str:
     return " ".join(s.split())
 
 
-def as_date(v) -> Optional[dt.date]:
+def as_date(v) -> dt.date | None:
     if isinstance(v, dt.datetime):
         return v.date()
     if isinstance(v, dt.date):
@@ -134,7 +133,7 @@ def fmt_change(x: float, comma: str = ",") -> str:
     return "0" + comma + "0"
 
 
-def fmt_date(d: Optional[dt.date]) -> str:
+def fmt_date(d: dt.date | None) -> str:
     return d.strftime("%d.%m.%Y") if d else "—"
 
 
@@ -237,7 +236,7 @@ class Db:
     groups: dict = field(default_factory=dict)
     values: dict = field(default_factory=dict)
 
-    def copy(self) -> "Db":
+    def copy(self) -> Db:
         return Db(list(self.objects), dict(self.groups), dict(self.values))
 
     @property
@@ -245,11 +244,11 @@ class Db:
         return not self.values
 
     @property
-    def first(self) -> Optional[dt.date]:
+    def first(self) -> dt.date | None:
         return min((d for d, _ in self.values), default=None)
 
     @property
-    def last(self) -> Optional[dt.date]:
+    def last(self) -> dt.date | None:
         return max((d for d, _ in self.values), default=None)
 
     def dates(self) -> list:
@@ -276,7 +275,7 @@ class ImportReport:
     last: dt.date
 
 
-def import_source(db: Optional[Db], src: Source, mode: int):
+def import_source(db: Db | None, src: Source, mode: int):
     db = db or Db()
     if mode == MODE_AUTO:
         mode = MODE_REPLACE if db.empty else MODE_APPEND
@@ -332,11 +331,11 @@ class ObjView:
     idx: int                 # 1-based base column
     name: str
     group: str
-    value_date: Optional[dt.date]
-    value: Optional[float]
-    prev_date: Optional[dt.date]
-    prev_value: Optional[float]
-    change: Optional[float]
+    value_date: dt.date | None
+    value: float | None
+    prev_date: dt.date | None
+    prev_value: float | None
+    change: float | None
     zone: int
     stale: bool
 
@@ -351,28 +350,28 @@ class View:
     label: str
     objects: list
     sorted: list
-    data_date: Optional[dt.date]
+    data_date: dt.date | None
     cnt_valued: int
     cnt_green: int
     cnt_yellow: int
     cnt_red: int            # red + over-limit
     cnt_over: int
     cnt_nodata: int
-    max_val: Optional[float]
+    max_val: float | None
     max_name: str
-    avg_val: Optional[float]
+    avg_val: float | None
     state: int
     obj_count: int
     stale_count: int
     days: list               # dates of the selected month (all days)
     trend: list              # per sorted row: list of 31 (value|None)
     maxday: list             # 31 (value|None)
-    last_max_date: Optional[dt.date]
+    last_max_date: dt.date | None
     months: list             # [(start, label)] newest first
     cfg: Cfg
 
 
-def zone_of(v: Optional[float], cfg: Cfg) -> int:
+def zone_of(v: float | None, cfg: Cfg) -> int:
     if v is None:
         return 0
     if v <= cfg.green:
@@ -400,7 +399,8 @@ def default_month(db: Db, today: dt.date) -> dt.date:
     return month_start(db.last) if not db.empty else month_start(today)
 
 
-def compute(db: Db, today: dt.date, sel: Optional[dt.date] = None, cfg: Cfg = Cfg()) -> View:
+def compute(db: Db, today: dt.date, sel: dt.date | None = None, cfg: Cfg | None = None) -> View:
+    cfg = cfg or Cfg()
     ms = month_start(sel) if sel else default_month(db, today)
     me = month_end(ms)
     is_current = ms <= today <= me
@@ -572,7 +572,7 @@ if __name__ == "__main__":  # quick manual check
     s = read_source(sys.argv[1])
     db, rep = import_source(None, s, 0)
     print(rep)
-    v = compute(db, dt.date.today())
+    v = compute(db, dt.date.today())  # noqa: DTZ011 - Excel TODAY() is local
     print(v.label, v.state, v.max_val, v.max_name, v.avg_val, v.data_date)
     for row in table_texts(v):
         print(row)

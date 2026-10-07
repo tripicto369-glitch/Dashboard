@@ -20,7 +20,7 @@ Private Const MAX_DASH_OBJECTS As Long = 40
 Private Const MAX_DB_DAYS As Long = 3700
 Private Const LOG_COLS As Long = 9
 Private Const LOG_MAX_ROWS As Long = 50
-Private Const MAX_EXAMPLES As Long = 5
+Private Const MAX_EXAMPLES As Long = 3
 
 ' --- результаты разбора исходного файла
 Private srcNames() As String
@@ -30,6 +30,7 @@ Private srcObjCount As Long
 Private recDate() As Long
 Private recObj() As Long
 Private recVal() As Double
+Private recSheet() As Long
 Private recCount As Long
 Private recCap As Long
 Private srcSheets As String
@@ -37,6 +38,8 @@ Private srcSheetCount As Long
 Private srcEmptySheets As Long
 Private srcTextSkipped As Long
 Private srcFileName As String
+Private srcSheetNames() As String
+Private curSheet As Long
 
 ' ============================================================================
 ' Точки входа
@@ -64,16 +67,25 @@ End Function
 
 ' Кнопка «Очистить базу» (лист «Настройки»).
 Public Sub ClearDatabase()
+    Dim msg As String
     If MsgBox("Удалить все загруженные данные из базы?" & vbCrLf & _
               "Дашборд будет пустым до следующего импорта.", _
               vbYesNo + vbExclamation + vbDefaultButton2, "Очистка базы") <> vbYes Then Exit Sub
-    ClearDatabaseSilent
-    MsgBox "База данных очищена.", vbInformation, "Очистка базы"
+    If ClearDatabaseSilent() Then
+        msg = "База данных очищена." & vbCrLf & SaveText(TrySave())
+        MsgBox msg, vbInformation, "Очистка базы"
+    Else
+        MsgBox "Не удалось очистить базу данных.", vbCritical, "Очистка базы"
+    End If
 End Sub
 
-Public Sub ClearDatabaseSilent()
+' Очистка без вопросов (функция — чтобы не попадала в список макросов Alt+F8).
+Public Function ClearDatabaseSilent() As Boolean
     Dim calcMode As Long
     calcMode = GetCalc()
+    On Error GoTo Fail
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
     SetCalc xlCalculationManual
     ClearDbArea
     SetNamedValue "sys_LastImport", Empty
@@ -81,10 +93,16 @@ Public Sub ClearDatabaseSilent()
     SetNamedValue "sys_LastMode", Empty
     SetNamedValue "sel_Month", Empty
     AddLogRow "Очистка базы", "", 0, 0, 0, 0, 0, ""
-    SetCalc calcMode
+    RestoreApp calcMode
     Application.Calculate
     UpdateStateIcon
-End Sub
+    ClearDatabaseSilent = True
+    Exit Function
+Fail:
+    Resume FailCleanup
+FailCleanup:
+    RestoreApp calcMode
+End Function
 
 ' ============================================================================
 ' Основной сценарий
@@ -93,7 +111,7 @@ End Sub
 Private Function RunImport(ByVal path As String, ByVal mode As Long, _
                            ByVal interactive As Boolean) As String
     Dim calcMode As Long, wbSrc As Workbook, openedHere As Boolean
-    Dim stage As String, report As String, ans As VbMsgBoxResult
+    Dim stage As String, report As String, ans As VbMsgBoxResult, errText As String
     Dim dbVals As Long, dbObj As Long, dbFirst As Long, dbLast As Long
 
     calcMode = GetCalc()
@@ -156,15 +174,18 @@ Private Function RunImport(ByVal path As String, ByVal mode As Long, _
     If interactive Then
         On Error Resume Next
         shDash.Activate
-        On Error GoTo 0
+        report = report & vbCrLf & vbCrLf & SaveText(TrySave())
+        If Len(report) > 1000 Then report = Left$(report, 990) & " …"
         MsgBox report, vbInformation, "Импорт завершен"
     End If
     RunImport = "OK" & vbLf & report
     Exit Function
 
 Fail:
-    Dim errText As String
+    ' Выходим из режима обработки ошибки, чтобы ошибки при уборке не прерывали ее.
     errText = "Ошибка на этапе «" & stage & "»:" & vbCrLf & Err.Description
+    Resume FailCleanup
+FailCleanup:
     On Error Resume Next
     If openedHere Then
         If Not wbSrc Is Nothing Then wbSrc.Close SaveChanges:=False
@@ -172,6 +193,23 @@ Fail:
     RestoreApp calcMode
     If interactive Then MsgBox errText, vbCritical, "Импорт данных"
     RunImport = "ERR" & vbLf & errText
+End Function
+
+' Сохраняет книгу после загрузки (в интерактивном режиме), чтобы база не потерялась.
+Private Function TrySave() As Boolean
+    On Error Resume Next
+    If ThisWorkbook.ReadOnly Or Len(ThisWorkbook.Path) = 0 Then Exit Function
+    Err.Clear
+    ThisWorkbook.Save
+    TrySave = (Err.Number = 0)
+End Function
+
+Private Function SaveText(ByVal saved As Boolean) As String
+    If saved Then
+        SaveText = "Книга сохранена."
+    Else
+        SaveText = "Книга не сохранена — сохраните ее вручную (Ctrl+S)."
+    End If
 End Function
 
 Private Function OpenSource(ByVal path As String, ByRef openedHere As Boolean) As Workbook
@@ -213,6 +251,9 @@ Private Sub ResetParse()
     ReDim recDate(1 To recCap)
     ReDim recObj(1 To recCap)
     ReDim recVal(1 To recCap)
+    ReDim recSheet(1 To recCap)
+    ReDim srcSheetNames(1 To 1)
+    curSheet = 0
     srcSheets = ""
     srcSheetCount = 0
     srcEmptySheets = 0
@@ -226,6 +267,9 @@ Private Sub ParseWorkbook(ByVal wb As Workbook)
     srcFileName = wb.Name
     For Each ws In wb.Worksheets
         nVals = 0
+        curSheet = curSheet + 1
+        ReDim Preserve srcSheetNames(1 To curSheet)
+        srcSheetNames(curSheet) = ws.Name
         If ParseSheet(ws, nVals) Then
             If nVals > 0 Then
                 srcSheetCount = srcSheetCount + 1
@@ -257,10 +301,10 @@ End Function
 
 ' Разбирает лист месяца. Возвращает False, если лист не похож на лист данных.
 Private Function ParseSheet(ByVal ws As Worksheet, ByRef nVals As Long) As Boolean
-    Dim hdr As Range, area As Range, used As Range
+    Dim hdr As Range, area As Range, cell As Range
     Dim nameRow As Long, groupRow As Long, dateCol As Long
     Dim firstRow As Long, lastRow As Long, lastCol As Long
-    Dim hdrNames As Variant, data As Variant, objMap() As Long
+    Dim data As Variant, objMap() As Long
     Dim nc As Long, r As Long, c As Long, d As Long, v As Double
     Dim nm As String, grp As String
 
@@ -274,23 +318,35 @@ Private Function ParseSheet(ByVal ws As Worksheet, ByRef nVals As Long) As Boole
     dateCol = area.Column
     firstRow = nameRow + 1
 
-    Set used = ws.UsedRange
-    lastRow = used.Row + used.Rows.Count - 1
-    lastCol = used.Column + used.Columns.Count - 1
+    ' Границы таблицы — по последней дате в столбце дат и последнему заголовку
+    ' (UsedRange может включать отформатированные пустые ячейки далеко за таблицей).
+    lastRow = ws.Cells(ws.Rows.Count, dateCol).End(xlUp).Row
+    Set cell = ws.Cells(nameRow, ws.Columns.Count).End(xlToLeft)
+    lastCol = cell.Column + cell.MergeArea.Columns.Count - 1
+    If groupRow > 0 Then
+        Set cell = ws.Cells(groupRow, ws.Columns.Count).End(xlToLeft)
+        If cell.Column + cell.MergeArea.Columns.Count - 1 > lastCol Then
+            lastCol = cell.Column + cell.MergeArea.Columns.Count - 1
+        End If
+    End If
     If lastRow < firstRow Or lastCol <= dateCol Then Exit Function
 
     nc = lastCol - dateCol + 1
-    hdrNames = ws.Range(ws.Cells(nameRow, dateCol), ws.Cells(nameRow, lastCol)).Value
     data = ws.Range(ws.Cells(firstRow, dateCol), ws.Cells(lastRow, lastCol)).Value
-    If Not IsArray(data) Then Exit Function
+    If Not IsArray(data) Then data = OneCell(data)
 
     ReDim objMap(1 To nc)
     For c = 2 To nc
-        nm = CleanText(hdrNames(1, c))
+        ' наименование может стоять в объединенной ячейке (в т.ч. на две строки заголовка)
+        Set cell = ws.Cells(nameRow, dateCol + c - 1).MergeArea
+        nm = ""
+        If cell.Column = dateCol + c - 1 Then nm = CleanText(cell.Cells(1, 1).Value)
         If Len(nm) > 0 And Not IsServiceHeader(nm) Then
             grp = ""
             If groupRow > 0 Then
-                grp = CleanText(ws.Cells(groupRow, dateCol + c - 1).MergeArea.Cells(1, 1).Value)
+                If ws.Cells(groupRow, dateCol + c - 1).MergeArea.Address <> cell.Address Then
+                    grp = CleanText(ws.Cells(groupRow, dateCol + c - 1).MergeArea.Cells(1, 1).Value)
+                End If
             End If
             objMap(c) = RegisterObject(nm, grp)
         End If
@@ -347,11 +403,13 @@ Private Sub AddRecord(ByVal d As Long, ByVal o As Long, ByVal v As Double)
         ReDim Preserve recDate(1 To recCap)
         ReDim Preserve recObj(1 To recCap)
         ReDim Preserve recVal(1 To recCap)
+        ReDim Preserve recSheet(1 To recCap)
     End If
     recCount = recCount + 1
     recDate(recCount) = d
     recObj(recCount) = o
     recVal(recCount) = v
+    recSheet(recCount) = curSheet
 End Sub
 
 Private Function MinRecDate() As Long
@@ -384,6 +442,7 @@ Private Function MergeAndWrite(ByVal mode As Long) As String
     Dim i As Long, r As Long, c As Long, fc As Long, d As Long
     Dim total As Long, added As Long, same As Long, conflicts As Long
     Dim examples As String, rep As String, oldV As Double, newV As Double
+    Dim srcFrom() As Long, dups As Long, dupText As String
 
     Set finKeys = New Collection
     ReDim finNames(1 To 1)
@@ -414,7 +473,7 @@ Private Function MergeAndWrite(ByVal mode As Long) As String
             fc = finCount
             If mode = MODE_APPEND Then
                 newObjCount = newObjCount + 1
-                If newObjCount <= 10 Then
+                If newObjCount <= 5 Then
                     If Len(newObjects) > 0 Then newObjects = newObjects & ", "
                     newObjects = newObjects & srcNames(i)
                 End If
@@ -445,7 +504,9 @@ Private Function MergeAndWrite(ByVal mode As Long) As String
     nDays = maxD - minD + 1
     If nDays > MAX_DB_DAYS Then
         Err.Raise vbObjectError + 516, , "Слишком длинный период данных: " & nDays & _
-            " дн. (допускается не более " & MAX_DB_DAYS & ")."
+            " дн. (допускается не более " & MAX_DB_DAYS & ")." & vbCrLf & _
+            "Даты в данных: " & DateText(minD) & " – " & DateText(maxD) & _
+            ". Проверьте, нет ли опечатки в годе."
     End If
 
     ' 3. Матрица итоговых данных (строки — дни, столбцы — объекты).
@@ -463,8 +524,21 @@ Private Function MergeAndWrite(ByVal mode As Long) As String
 
     ' Значения файла (при повторе даты/объекта в файле берется последнее).
     ReDim srcMat(1 To nDays, 1 To srcObjCount)
+    ReDim srcFrom(1 To nDays, 1 To srcObjCount)
     For i = 1 To recCount
-        srcMat(recDate(i) - minD + 1, recObj(i)) = recVal(i)
+        r = recDate(i) - minD + 1
+        c = recObj(i)
+        ' одна и та же дата объекта на разных листах (например, скопированный лист
+        ' со старыми датами) — берется последний лист, факт попадает в отчет
+        If srcFrom(r, c) > 0 And srcFrom(r, c) <> recSheet(i) Then
+            dups = dups + 1
+            If dups = 1 Then
+                dupText = "«" & srcSheetNames(srcFrom(r, c)) & "» и «" & _
+                    srcSheetNames(recSheet(i)) & "», " & DateText(recDate(i))
+            End If
+        End If
+        srcMat(r, c) = recVal(i)
+        srcFrom(r, c) = recSheet(i)
     Next i
     For r = 1 To nDays
         For c = 1 To srcObjCount
@@ -495,13 +569,8 @@ Private Function MergeAndWrite(ByVal mode As Long) As String
     ' 4. Запись.
     WriteDb finNames, finGroups, finCount, mat, nDays, minD
 
-    ' 5. Отчет, журнал, выбор месяца.
+    ' 5. Отчет (сначала итоги, потом подробности), журнал, выбор месяца.
     rep = "Файл: " & srcFileName & vbCrLf
-    rep = rep & "Листов с данными: " & srcSheetCount
-    If srcSheetCount > 0 And srcSheetCount <= 12 Then rep = rep & " (" & srcSheets & ")"
-    rep = rep & vbCrLf
-    If srcEmptySheets > 0 Then rep = rep & "Листов без значений: " & srcEmptySheets & vbCrLf
-    rep = rep & "Значений в файле: " & Format$(total, "#,##0") & vbCrLf & vbCrLf
     If mode = MODE_REPLACE Then
         rep = rep & "Режим: полная загрузка (база заполнена заново)" & vbCrLf
         rep = rep & "Загружено значений: " & Format$(added, "#,##0") & vbCrLf
@@ -510,20 +579,37 @@ Private Function MergeAndWrite(ByVal mode As Long) As String
         rep = rep & "Добавлено новых значений: " & Format$(added, "#,##0") & vbCrLf
         rep = rep & "Уже были в базе: " & Format$(same, "#,##0") & vbCrLf
         If conflicts > 0 Then
-            rep = rep & "Отличаются от базы (оставлены как в базе): " & conflicts & examples
-            If conflicts > MAX_EXAMPLES Then rep = rep & vbCrLf & "   … и еще " & (conflicts - MAX_EXAMPLES)
-            rep = rep & vbCrLf & "   Чтобы заменить их, выполните импорт с полной перезагрузкой." & vbCrLf
+            rep = rep & "Отличаются от базы (оставлены как в базе): " & conflicts & vbCrLf
         End If
-        If newObjCount > 0 Then rep = rep & "Новых объектов: " & newObjCount & " (" & newObjects & ")" & vbCrLf
+        If newObjCount > 0 Then rep = rep & "Новых объектов: " & newObjCount & vbCrLf
     End If
     rep = rep & "Объектов в базе: " & finCount & vbCrLf
     rep = rep & "Период данных в базе: " & DateText(minD) & " – " & DateText(maxD)
+    If finCount > MAX_DASH_OBJECTS Then
+        rep = rep & vbCrLf & "Внимание: на дашборд выводятся первые " & MAX_DASH_OBJECTS & _
+            " объектов из " & finCount & "."
+    End If
     If srcTextSkipped > 0 Then
         rep = rep & vbCrLf & "Пропущено нечисловых значений: " & srcTextSkipped
     End If
-    If finCount > MAX_DASH_OBJECTS Then
-        rep = rep & vbCrLf & vbCrLf & "Внимание: на дашборд выводятся первые " & MAX_DASH_OBJECTS & _
-            " объектов из " & finCount & "."
+    If dups > 0 Then
+        rep = rep & vbCrLf & "Даты повторяются на разных листах: " & dups & _
+            " знач. (например, " & dupText & "); взяты значения с последнего листа."
+    End If
+    rep = rep & vbCrLf & vbCrLf & "Значений в файле: " & Format$(total, "#,##0") & _
+        "; листов с данными: " & srcSheetCount
+    If srcSheetCount > 0 And srcSheetCount <= 12 Then rep = rep & " (" & srcSheets & ")"
+    If srcEmptySheets > 0 Then rep = rep & "; листов без значений: " & srcEmptySheets
+    If mode = MODE_APPEND Then
+        If conflicts > 0 Then
+            rep = rep & vbCrLf & "Расхождения с базой:" & examples
+            If conflicts > MAX_EXAMPLES Then rep = rep & vbCrLf & "   … и еще " & (conflicts - MAX_EXAMPLES)
+            rep = rep & vbCrLf & "Чтобы заменить их, выполните импорт с полной перезагрузкой."
+        End If
+        If newObjCount > 0 Then
+            rep = rep & vbCrLf & "Новые объекты: " & newObjects
+            If newObjCount > 5 Then rep = rep & " …"
+        End If
     End If
 
     SetNamedValue "sys_LastImport", Now
@@ -553,8 +639,7 @@ Private Sub ReadDb(ByRef dbNames As Variant, ByRef dbGroups As Variant, ByRef db
     Next c
     col = shDB.Range(shDB.Cells(DB_FIRST_ROW, 1), shDB.Cells(DB_FIRST_ROW + MAX_DB_DAYS - 1, 1)).Value
     For r = 1 To MAX_DB_DAYS
-        If ToDateSerial(col(r, 1)) = 0 Then Exit For
-        dbRows = r
+        If ToDateSerial(col(r, 1)) > 0 Then dbRows = r   ' последняя строка с датой
     Next r
     If dbObj = 0 Or dbRows = 0 Then
         dbObj = 0
@@ -582,13 +667,15 @@ Private Sub DbStats(ByRef nVals As Long, ByRef nObj As Long, ByRef firstD As Lon
     ReadDb dbNames, dbGroups, dbDates, dbData, dbRows, nObj
     For r = 1 To dbRows
         d = ToDateSerial(dbDates(r, 1))
-        For c = 1 To nObj
-            If IsNumber(dbData(r, c)) Then
-                nVals = nVals + 1
-                If firstD = 0 Or d < firstD Then firstD = d
-                If d > lastD Then lastD = d
-            End If
-        Next c
+        If d > 0 Then
+            For c = 1 To nObj
+                If IsNumber(dbData(r, c)) Then
+                    nVals = nVals + 1
+                    If firstD = 0 Or d < firstD Then firstD = d
+                    If d > lastD Then lastD = d
+                End If
+            Next c
+        End If
     Next r
 End Sub
 
@@ -613,6 +700,8 @@ Private Sub WriteDb(finNames() As String, finGroups() As String, ByVal finCount 
         dates(r, 1) = CDate(minD + r - 1)
     Next r
     With shDB
+        ' наименования — как текст (иначе «0322» или «1.10» Excel превратит в число/дату)
+        .Range(.Cells(1, 2), .Cells(2, 1 + finCount)).NumberFormat = "@"
         .Range(.Cells(1, 2), .Cells(1, 1 + finCount)).Value = hdrN
         .Range(.Cells(2, 2), .Cells(2, 1 + finCount)).Value = hdrG
         .Range(.Cells(DB_FIRST_ROW, 1), .Cells(DB_FIRST_ROW + nDays - 1, 1)).NumberFormat = "dd.mm.yyyy"
@@ -667,7 +756,11 @@ End Sub
 
 Public Sub SetNamedValue(ByVal nm As String, ByVal v As Variant)
     On Error Resume Next
-    ThisWorkbook.Names(nm).RefersToRange.Value = v
+    If IsEmpty(v) Then
+        ThisWorkbook.Names(nm).RefersToRange.ClearContents
+    Else
+        ThisWorkbook.Names(nm).RefersToRange.Value = v
+    End If
 End Sub
 
 ' Выбирает на дашборде месяц: текущий, если он есть в данных, иначе последний.
