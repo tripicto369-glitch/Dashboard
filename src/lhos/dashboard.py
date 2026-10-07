@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import xlsxwriter
 from xlsxwriter.utility import xl_col_to_name, xl_rowcol_to_cell
 
-from .canvas import Canvas, Rich
+from .canvas import Canvas, Rich, cached
 from .theme import C, FONT, FONT_SEMI, MONTHS_RU, ZONE_COLOR
 
 # ----------------------------------------------------------------------------
@@ -60,6 +60,23 @@ W, H = 1390, 1006                # размер макета дашборда, p
 # Форматы значений: «?» дополняет второй знак пробелом — запятые в столбце ровные
 VAL_FMT = "0.0?"
 CHG_FMT = "+0.0?;-0.0?;0.0?"
+
+
+def _wf(ws, r: int, c: int, formula: str, fmt=None) -> None:
+    """write_formula с сохраненным результатом из кэша сборки (см. build.py)."""
+    ws.write_formula(r, c, formula, fmt, cached(ws, r, c))
+
+
+def _wfn(ws, r: int, c: int, formula: str, fmt=None) -> None:
+    """Для ячеек — источников диаграмм: сохраняется только числовой результат.
+    По сохраненным значениям xlsxwriter строит кэш ряда; текст «#N/A» сделал бы ряд
+    строковым (strCache), и точки рисовались бы нулями."""
+    v = cached(ws, r, c)
+    ws.write_formula(r, c, formula, fmt, v if isinstance(v, (int, float)) else 0)
+
+
+def _waf(ws, r: int, c: int, formula: str, fmt=None) -> None:
+    ws.write_array_formula(r, c, r, c, formula, fmt, cached(ws, r, c))
 
 
 def _q(sheet: str) -> str:
@@ -205,7 +222,8 @@ PARAMS = [  # (имя, подпись, формула, массив?, форма
      '=CHOOSE(c_State+1,"НЕТ ДАННЫХ","НОРМА","ВНИМАНИЕ","РИСК","ПРЕВЫШЕНИЕ")', False, "@"),
     ("c_StateSub", "Состояние, пояснение",
      '=CHOOSE(c_State+1,IF(c_ObjCount=0,"Загрузите файл с данными",IF(c_IsCurrent,'
-     '"Нет значений за сегодня и вчера","Нет значений за "&LOWER(c_MonthLabel))),'
+     'IF(DAY(c_Today)=1,"Нет значений за сегодня и вчера","Нет значений с начала месяца"),'
+     '"Нет значений за "&LOWER(c_MonthLabel))),'
      '"Превышений не зафиксировано",'
      '"В желтой зоне: "&c_CntYellow&" СИКН","В красной зоне: "&c_CntRed&" СИКН",'
      '"Выше норматива: "&c_CntOver&" СИКН")', False, "@"),
@@ -243,9 +261,9 @@ def build_calc_sheet(wb, ws) -> None:
         r = 1 + i  # строки 2..
         ws.write(r, 0, label)
         if is_array:
-            ws.write_array_formula(r, 1, r, 1, formula, f(num))
+            _waf(ws, r, 1, formula, f(num))
         else:
-            ws.write_formula(r, 1, formula, f(num))
+            _wf(ws, r, 1, formula, f(num))
         wb.define_name(name, f"={_q(S_CALC)}!$B${r + 1}")
     assert 1 + len(PARAMS) < OBJ_R0 - 3
 
@@ -257,13 +275,13 @@ def build_calc_sheet(wb, ws) -> None:
              ("Красная", "=c_CntRed", "c_LegR"), ("Нет данных", "=IF(c_ObjCount=0,1,c_CntNoData)", None)]
     for i, (lbl, formula, leg) in enumerate(donut):
         ws.write(1 + i, 3, lbl)
-        ws.write_formula(1 + i, 4, formula)
+        _wfn(ws, 1 + i, 4, formula)
         if leg:
             cnt = formula[1:]
-            ws.write_formula(1 + i, 5, f'={cnt}&" ("&ROUND(100*{cnt}/MAX(1,c_CntValued),0)&"%)"')
+            _wf(ws, 1 + i, 5, f'={cnt}&" ("&ROUND(100*{cnt}/MAX(1,c_CntValued),0)&"%)"')
             wb.define_name(leg, f"={_q(S_CALC)}!$F${2 + i}")
     ws.write(6, 3, "Всего")
-    ws.write_formula(6, 4, "=c_ObjCount")
+    _wf(ws, 6, 4, "=c_ObjCount")
     wb.define_name("c_Total", f"={_q(S_CALC)}!$E$7")
 
     # Объекты в порядке базы
@@ -275,25 +293,25 @@ def build_calc_sheet(wb, ws) -> None:
         r = OBJ_R0 + i  # 1-based
         ri = r - 1
         ws.write_number(ri, 0, i + 1)
-        ws.write_formula(ri, 1, f'=IF($A{r}>c_ObjCount,"",INDEX(db_Names,1,$A{r})&"")')
-        ws.write_formula(ri, 2, f'=IF($B{r}="","",INDEX(db_Groups,1,$A{r})&"")')
-        ws.write_array_formula(ri, 3, ri, 3,
+        _wf(ws, ri, 1, f'=IF($A{r}>c_ObjCount,"",INDEX(db_Names,1,$A{r})&"")')
+        _wf(ws, ri, 2, f'=IF($B{r}="","",INDEX(db_Groups,1,$A{r})&"")')
+        _waf(ws, ri, 3,
             f'{{=IF($B{r}="",0,MAX(IF((db_Dates>=c_LowDate)*(db_Dates<=c_RefDate)'
             f'*ISNUMBER(INDEX(db_Vals,0,$A{r})),db_Dates,0)))}}', date_f)
-        ws.write_formula(ri, 4, f'=IF($D{r}=0,"",INDEX(db_Vals,MATCH($D{r},db_Dates,0),$A{r}))')
-        ws.write_array_formula(ri, 5, ri, 5,
+        _wf(ws, ri, 4, f'=IF($D{r}=0,"",INDEX(db_Vals,MATCH($D{r},db_Dates,0),$A{r}))')
+        _waf(ws, ri, 5,
             f'{{=IF($E{r}="",0,MAX(IF((db_Dates<$D{r})*ISNUMBER(INDEX(db_Vals,0,$A{r})),db_Dates,0)))}}',
             date_f)
-        ws.write_formula(ri, 6, f'=IF($F{r}=0,"",INDEX(db_Vals,MATCH($F{r},db_Dates,0),$A{r}))')
+        _wf(ws, ri, 6, f'=IF($F{r}=0,"",INDEX(db_Vals,MATCH($F{r},db_Dates,0),$A{r}))')
         # зона и изменение — по значению, округленному до 2 знаков (как на экране)
-        ws.write_formula(ri, 7, f'=IF(OR($E{r}="",$G{r}=""),"",'
+        _wf(ws, ri, 7, f'=IF(OR($E{r}="",$G{r}=""),"",'
                                 f'ROUND(ROUND($E{r},2)-ROUND($G{r},2),2))')
-        ws.write_formula(ri, 8, f'=IF($B{r}="",-1,IF($E{r}="",0,IF(ROUND($E{r},2)<=cfg_Green,1,'
+        _wf(ws, ri, 8, f'=IF($B{r}="",-1,IF($E{r}="",0,IF(ROUND($E{r},2)<=cfg_Green,1,'
                                 f'IF(ROUND($E{r},2)<=cfg_Yellow,2,IF(ROUND($E{r},2)<=cfg_Limit,3,4)))))')
         # ключ сортировки: значение по убыванию, при равенстве — порядок базы
-        ws.write_formula(ri, 9, f'=IF($B{r}="",-2-$A{r}/1000000,IF($E{r}="",-1-$A{r}/1000000,'
+        _wf(ws, ri, 9, f'=IF($B{r}="",-2-$A{r}/1000000,IF($E{r}="",-1-$A{r}/1000000,'
                                 f'ROUND($E{r},6)-$A{r}/100000000))')
-        ws.write_formula(ri, 10, f'=IF(OR($E{r}="",c_DataDate=""),0,IF($D{r}<c_DataDate,1,0))')
+        _wf(ws, ri, 10, f'=IF(OR($E{r}="",c_DataDate=""),0,IF($D{r}<c_DataDate,1,0))')
 
     # Сортировка по убыванию значения + тренды по дням выбранного месяца
     o0, o1 = OBJ_R0, OBJ_R0 + MAX_OBJ - 1
@@ -308,26 +326,26 @@ def build_calc_sheet(wb, ws) -> None:
         c = TR_C0 + d
         col = xl_col_to_name(c)
         ws.write_number(DAYNUM_R - 1, c, d + 1)
-        ws.write_formula(DAYDATE_R - 1, c,
+        _wf(ws, DAYDATE_R - 1, c,
                          f'=IF({col}${DAYNUM_R}<=DAY(c_MonthEnd),c_MonthStart+{col}${DAYNUM_R}-1,"")',
                          ddmm)
     for k in range(MAX_OBJ):
         r = SORT_R0 + k
         ri = r - 1
         ws.write_number(ri, 0, k + 1)
-        ws.write_formula(ri, 1, f"=MATCH(LARGE($J${o0}:$J${o1},$A{r}),$J${o0}:$J${o1},0)")
-        ws.write_formula(ri, 2, f"=INDEX($B${o0}:$B${o1},$B{r})")
-        ws.write_formula(ri, 3, f"=INDEX($E${o0}:$E${o1},$B{r})")
-        ws.write_formula(ri, 4, f"=INDEX($I${o0}:$I${o1},$B{r})")
-        ws.write_formula(ri, 5, f"=INDEX($H${o0}:$H${o1},$B{r})")
-        ws.write_formula(ri, 6, f"=INDEX($K${o0}:$K${o1},$B{r})")
-        ws.write_formula(ri, 7, f"=INDEX($D${o0}:$D${o1},$B{r})", date_f)
+        _wf(ws, ri, 1, f"=MATCH(LARGE($J${o0}:$J${o1},$A{r}),$J${o0}:$J${o1},0)")
+        _wf(ws, ri, 2, f"=INDEX($B${o0}:$B${o1},$B{r})")
+        _wf(ws, ri, 3, f"=INDEX($E${o0}:$E${o1},$B{r})")
+        _wf(ws, ri, 4, f"=INDEX($I${o0}:$I${o1},$B{r})")
+        _wf(ws, ri, 5, f"=INDEX($H${o0}:$H${o1},$B{r})")
+        _wf(ws, ri, 6, f"=INDEX($K${o0}:$K${o1},$B{r})")
+        _wf(ws, ri, 7, f"=INDEX($D${o0}:$D${o1},$B{r})", date_f)
         for d in range(31):
             c = TR_C0 + d
             col = xl_col_to_name(c)
             day = f"{col}${DAYDATE_R}"
             look = f"INDEX(db_Vals,MATCH({day},db_Dates,0),$B{r})"
-            ws.write_formula(ri, c, f'=IFERROR(IF(OR($C{r}="",{day}="",{day}>c_RefDate),NA(),'
+            _wf(ws, ri, c, f'=IFERROR(IF(OR($C{r}="",{day}="",{day}>c_RefDate),NA(),'
                                     f'IF(ISNUMBER({look}),{look},NA())),NA())')
 
     # Динамика максимального значения
@@ -340,15 +358,15 @@ def build_calc_sheet(wb, ws) -> None:
         col = xl_col_to_name(c)
         day = f"{col}${DAYDATE_R}"
         row = f"INDEX(db_Vals,MATCH({day},db_Dates,0),0)"
-        ws.write_formula(MAXDAY_R - 1, c, f'=IFERROR(IF(OR({day}="",{day}>c_RefDate),NA(),'
+        _wfn(ws, MAXDAY_R - 1, c, f'=IFERROR(IF(OR({day}="",{day}>c_RefDate),NA(),'
                                           f'IF(COUNT({row})=0,NA(),MAX({row}))),NA())')
-        ws.write_formula(LIM_R - 1, c, f'=IF({day}="",NA(),cfg_Limit)')
-        ws.write_formula(YEL_R - 1, c, f'=IF({day}="",NA(),cfg_Yellow)')
-        ws.write_formula(GRN_R - 1, c, f'=IF({day}="",NA(),cfg_Green)')
-        ws.write_formula(LAST_R - 1, c, f"=IF(ISNUMBER({col}{MAXDAY_R}),"
+        _wfn(ws, LIM_R - 1, c, f'=IF({day}="",NA(),cfg_Limit)')
+        _wfn(ws, YEL_R - 1, c, f'=IF({day}="",NA(),cfg_Yellow)')
+        _wfn(ws, GRN_R - 1, c, f'=IF({day}="",NA(),cfg_Green)')
+        _wfn(ws, LAST_R - 1, c, f"=IF(ISNUMBER({col}{MAXDAY_R}),"
                                         f"IF({day}=c_LastMaxDate,{col}{MAXDAY_R},NA()),NA())")
         # подписи оси — каждые 7 дней (1, 8, 15, 22, 29), остальные пустые
-        ws.write_formula(CAT_R - 1, c, f'=IF(OR({day}="",MOD({col}${DAYNUM_R}-1,7)<>0),"",'
+        _wf(ws, CAT_R - 1, c, f'=IF(OR({day}="",MOD({col}${DAYNUM_R}-1,7)<>0),"",'
                                        f'RIGHT("0"&DAY({day}),2)&"."&RIGHT("0"&MONTH({day}),2))')
 
     # Список месяцев (последний — первым)
@@ -357,9 +375,9 @@ def build_calc_sheet(wb, ws) -> None:
         r = MONTH_R0 + k
         ri = r - 1
         ws.write_number(ri, 0, k + 1)
-        ws.write_formula(ri, 1, f'=IF(c_LastMonth="","",IF(EDATE(c_LastMonth,1-$A{r})<c_FirstMonth,"",'
+        _wf(ws, ri, 1, f'=IF(c_LastMonth="","",IF(EDATE(c_LastMonth,1-$A{r})<c_FirstMonth,"",'
                                 f'EDATE(c_LastMonth,1-$A{r})))', date_f)
-        ws.write_formula(ri, 2, f'=IF($B{r}="","",{_months_choose(f"$B{r}")}&" "&YEAR($B{r}))')
+        _wf(ws, ri, 2, f'=IF($B{r}="","",{_months_choose(f"$B{r}")}&" "&YEAR($B{r}))')
     m0, m1 = MONTH_R0, MONTH_R0 + MONTH_N - 1
     wb.define_name("m_Starts", f"={_q(S_CALC)}!$B${m0}:$B${m1}")
     wb.define_name("m_Labels", f"={_q(S_CALC)}!$C${m0}:$C${m1}")
@@ -430,7 +448,7 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
            num="dd.mm.yyyy hh:mm", align="left")
     cv.put((906, 92, 952, 126), "ФАЙЛ:", **lbl)
     cv.put((952, 92, 1186, 126),
-           '=IF(sys_LastFile="","—",IF(LEN(sys_LastFile)>36,LEFT(sys_LastFile,34)&"…",'
+           '=IF(sys_LastFile="","—",IF(LEN(sys_LastFile)>31,LEFT(sys_LastFile,29)&"…",'
            'sys_LastFile))', size=9, color=C["text2"])
     button(cv, 1196, 92, assets.button("import"), "ImportData")
 
@@ -470,12 +488,13 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
              (1058, 1166, "КРАСНАЯ ЗОНА", "=c_CntRed", C["red"])]
     for i, (x0, x1, t, frm, col) in enumerate(zones):
         cv.put((x0, 170, x1, 188), t, font=FONT_SEMI, size=8, color=col)
-        cv.put((x0, 190, x1, 230), frm, size=24, color=col, num="0", align="left")
+        cv.put((x0, 190, x1, 230), frm, size=22, color=col, num="0", align="left")
         if i:
             cv.vline(x0 - 6, 172, 228, C["line"])
     cv.vline(1172, 150, 228, C["divider"])
     cv.put((1186, 146, 1370, 166), "ВСЕГО СИКН", **klabel)
-    cv.put((1186, 168, 1370, 206), "=c_ObjCount", num="0", align="left", **big)
+    cv.put((1186, 168, 1370, 206), "=c_ObjCount", num="0", align="left", size=20,
+           valign="bottom", shrink=True)
     cv.put((1186, 208, 1370, 230), '=IF(c_CntNoData>0,"нет данных: "&c_CntNoData,"")', size=9,
            color=C["muted"])
 
@@ -488,7 +507,8 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     stale_note = 'IF(c_StaleCount>0,"* — значение за предыдущую дату","")'
     cv.put((700, 250, 1022, 284),
            f'=IF(c_ObjCount=0,"База пуста — нажмите «ИМПОРТ ДАННЫХ»",'
-           f'IF(COUNTA(db_Names)>{TABLE_ROWS},"Показаны {TABLE_ROWS} из "&COUNTA(db_Names)&" СИКН"'
+           f'IF(COUNTA({_q(S_DB)}!$B$1:$ZZ$1)>{TABLE_ROWS},"Показаны {TABLE_ROWS} из "'
+           f'&COUNTA({_q(S_DB)}!$B$1:$ZZ$1)&" СИКН"'
            f'&IF(c_StaleCount>0,"; * — значение за предыдущую дату",""),{stale_note}))',
            size=8, color=C["muted"], align="right")
     cols = [  # (x0, x1, заголовок, выравнивание)
@@ -521,7 +541,7 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
                align="center")
         cv.put((180, y0, 360, y1), f"={nm}", size=9.5, color=C["text"], indent=1, shrink=True)
         cv.put((360, y0, 470, y1), f'=IF({nm}="","",IF({val}="","—",{val}))', font=FONT_SEMI,
-               size=10, color=C["green"], align="center", num=VAL_FMT)
+               size=10, color=C["green"], align="center", num=VAL_FMT + "_*")
         cv.put((470, y0, 610, y1),
                f'=IF({nm}="","",CHOOSE({zone}+1,"●  НЕТ ДАННЫХ","●  НОРМА","●  ВНИМАНИЕ",'
                f'"●  РИСК","●  ПРЕВЫШЕНИЕ"))', font=FONT_SEMI, size=8.5, color=C["green"],
@@ -568,8 +588,8 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
         cv.put((1180, y, 1366, y + 20), frm, font=FONT_SEMI, size=11, color=col)
         cv.put((1180, y + 20, 1366, y + 38), t1, font=FONT_SEMI, size=8, color=col)
         cv.put((1180, y + 38, 1366, y + 56), t2, size=8.5, color=C["text"])
-    cv.hline(1168, 1366, 392, C["line"])
-    cv.hline(1168, 1366, 462, C["line"])
+    for y in (322, 392, 462, 532):
+        cv.hline(1168, 1366, y, C["line"])
     cv.put((1064, 541, 1366, 558), "Все значения указаны в ppm", size=7.5, color=C["muted"],
            align="center")
 
@@ -629,7 +649,7 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
     cv.image(540, 972, assets.icon("ui_doc"), scale=20 / 48)
     cv.put((566, 962, 1010, 996),
            '=IF(sys_LastFile="","Данные не загружены — нажмите «Импорт данных»",'
-           '"Источник данных: "&IF(LEN(sys_LastFile)>62,LEFT(sys_LastFile,60)&"…",'
+           '"Источник данных: "&IF(LEN(sys_LastFile)>44,LEFT(sys_LastFile,42)&"…",'
            'sys_LastFile))', size=9, color=C["text2"])
     cv.image(1040, 972, assets.icon("ui_shield"), scale=20 / 48)
     cv.put((1066, 962, 1122, 996), "Доступ:", size=9, color=C["muted"])
@@ -648,7 +668,7 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
 
     # служебные ячейки: зона/«ранняя дата» строк таблицы, состояние
     state_r = cv.cell_range(card1)[0]
-    ws.write_formula(state_r, helper_c, "=c_State")
+    _wf(ws, state_r, helper_c, "=c_State")
     state_ref = xl_rowcol_to_cell(state_r, helper_c, row_abs=True, col_abs=True)
     zone_c, stale_c = helper_c, helper_c + 1
     table_cells = []
@@ -657,8 +677,8 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
         rr = cv.cell_range((140, y0, 180, y1))[0]
         if k == 0 and rr == state_r:
             raise AssertionError("helper collision")
-        ws.write_formula(rr, zone_c, f"={_calc(f'$E${r}')}")
-        ws.write_formula(rr, stale_c, f"={_calc(f'$G${r}')}")
+        _wf(ws, rr, zone_c, f"={_calc(f'$E${r}')}")
+        _wf(ws, rr, stale_c, f"={_calc(f'$G${r}')}")
         table_cells.append(rr)
     for c in range(helper_c - 1, helper_c + 2):
         ws.set_column(c, c, 8, None, {"hidden": True})
@@ -693,7 +713,8 @@ def build_dash_sheet(wb, ws, assets: Assets) -> dict:
         return fmt_cache[key]
 
     for z in (1, 2, 3, 4):
-        for st, num in ((0, VAL_FMT), (1, VAL_FMT + '"*"')):
+        # «_*» — пробел шириной «*»: запятые у значений с отметкой и без совпадают
+        for st, num in ((0, VAL_FMT + "_*"), (1, VAL_FMT + '"*"')):
             ws.conditional_format(rng(value_c), {
                 "type": "formula", "criteria": f"=AND({zr}={z},{sr}={st})",
                 "format": cf_fmt(ZONE_COLOR[z], num)})
@@ -761,8 +782,9 @@ def max_chart(wb):
                    "line": {"none": True},
                    "marker": {"type": "circle", "size": 6,
                               "fill": {"color": C["green"]}, "border": {"color": "#FFFFFF"}},
-                   "data_labels": {"value": True, "position": "right", "num_format": "0.0#",
-                                   "font": {"name": FONT, "size": 9, "bold": True,
+                   "data_labels": {"value": True, "position": "above", "num_format": "0.0#",
+                                   "fill": {"color": C["panel"]}, "border": {"none": True},
+                                   "font": {"name": FONT, "size": 10, "bold": False,
                                             "color": C["green"]}}})
     axis_font = {"name": FONT, "size": 7.5, "color": C["muted"], "rotation": 0}
     ch.set_x_axis({"num_font": axis_font, "text_axis": True,
@@ -799,7 +821,7 @@ def build_placeholder(wb, ws, assets: Assets, active: int, title: str, text: str
            color=C["text"], align="center")
     cv.put((300, 530, 1206, 600), text, size=10, color=C["muted"], align="center", wrap=True,
            valign="top")
-    cv.put((660, 620, 846, 652), "← К СВОДКЕ", bold=True, size=9.5, color=C["green"],
+    cv.put((660, 620, 846, 652), "← К СВОДКЕ", font=FONT_SEMI, size=9.5, color=C["green"],
            align="center", url=f"internal:{_q(S_DASH)}!A1", url_tip="Перейти на сводку")
     cv.build()
     header_cf(wb, ws, cv)
@@ -971,6 +993,10 @@ def postprocess(path: str) -> None:
                 n_btn = xml.count('descr="btn:')
                 assert xml.count('macro="[0]!') == n_btn, f"macro patch failed in {item.filename}"
                 data = xml.encode("utf-8")
+            if item.filename.startswith("xl/worksheets/sheet"):
+                # пустой сохраненный результат формулы — как пустая строка (t="str")
+                data = re.sub(rb'<c (r="[A-Z]+[0-9]+"(?: s="[0-9]+")?)>(<f[^>]*>(?:(?!</f>).)*</f>)'
+                              rb'<v></v></c>', rb'<c \1 t="str">\2<v></v></c>', data)
             zout.writestr(item, data)
     os.replace(tmp, path)
 

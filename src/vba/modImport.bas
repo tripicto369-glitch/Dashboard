@@ -174,8 +174,8 @@ Private Function RunImport(ByVal path As String, ByVal mode As Long, _
     If interactive Then
         On Error Resume Next
         shDash.Activate
+        If Len(report) > 900 Then report = Left$(report, 890) & " …"
         report = report & vbCrLf & vbCrLf & SaveText(TrySave())
-        If Len(report) > 1000 Then report = Left$(report, 990) & " …"
         MsgBox report, vbInformation, "Импорт завершен"
     End If
     RunImport = "OK" & vbLf & report
@@ -318,15 +318,21 @@ Private Function ParseSheet(ByVal ws As Worksheet, ByRef nVals As Long) As Boole
     dateCol = area.Column
     firstRow = nameRow + 1
 
-    ' Границы таблицы — по последней дате в столбце дат и последнему заголовку
-    ' (UsedRange может включать отформатированные пустые ячейки далеко за таблицей).
-    lastRow = ws.Cells(ws.Rows.Count, dateCol).End(xlUp).Row
-    Set cell = ws.Cells(nameRow, ws.Columns.Count).End(xlToLeft)
-    lastCol = cell.Column + cell.MergeArea.Columns.Count - 1
+    ' Границы таблицы — по последней заполненной ячейке столбца дат и строк заголовка
+    ' (UsedRange может включать отформатированные пустые ячейки далеко за таблицей,
+    ' а End(xlUp) пропускает строки, скрытые фильтром).
+    Set cell = LastCell(ws.Columns(dateCol), True)
+    If cell Is Nothing Then Exit Function
+    lastRow = cell.Row
+    lastCol = 0
+    Set cell = LastCell(ws.Rows(nameRow), False)
+    If Not cell Is Nothing Then lastCol = cell.MergeArea.Column + cell.MergeArea.Columns.Count - 1
     If groupRow > 0 Then
-        Set cell = ws.Cells(groupRow, ws.Columns.Count).End(xlToLeft)
-        If cell.Column + cell.MergeArea.Columns.Count - 1 > lastCol Then
-            lastCol = cell.Column + cell.MergeArea.Columns.Count - 1
+        Set cell = LastCell(ws.Rows(groupRow), False)
+        If Not cell Is Nothing Then
+            If cell.MergeArea.Column + cell.MergeArea.Columns.Count - 1 > lastCol Then
+                lastCol = cell.MergeArea.Column + cell.MergeArea.Columns.Count - 1
+            End If
         End If
     End If
     If lastRow < firstRow Or lastCol <= dateCol Then Exit Function
@@ -368,6 +374,18 @@ Private Function ParseSheet(ByVal ws As Worksheet, ByRef nVals As Long) As Boole
             Next c
         End If
     Next r
+End Function
+
+' Последняя непустая ячейка строки/столбца, включая скрытые фильтром.
+Private Function LastCell(ByVal rng As Range, ByVal byRows As Boolean) As Range
+    On Error Resume Next
+    If byRows Then
+        Set LastCell = rng.Find(What:="*", LookIn:=xlFormulas, LookAt:=xlPart, _
+            SearchOrder:=xlByRows, SearchDirection:=xlPrevious)
+    Else
+        Set LastCell = rng.Find(What:="*", LookIn:=xlFormulas, LookAt:=xlPart, _
+            SearchOrder:=xlByColumns, SearchDirection:=xlPrevious)
+    End If
 End Function
 
 ' Итоговые и служебные столбцы рядом с данными («Среднее», «Итого» …) — не объекты.
@@ -757,7 +775,8 @@ End Sub
 Public Sub SetNamedValue(ByVal nm As String, ByVal v As Variant)
     On Error Resume Next
     If IsEmpty(v) Then
-        ThisWorkbook.Names(nm).RefersToRange.ClearContents
+        ' ячейки объединенные: ClearContents части объединения в Excel — ошибка
+        ThisWorkbook.Names(nm).RefersToRange.MergeArea.ClearContents
     Else
         ThisWorkbook.Names(nm).RefersToRange.Value = v
     End If

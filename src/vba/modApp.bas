@@ -6,7 +6,9 @@ Option Explicit
 
 Private nextTick As Date
 Private clockOn As Boolean
+Private tickProc As String
 Private lastDay As Long
+Private lastBucket As Long
 Private shownState As Long
 Private stateKnown As Boolean
 
@@ -17,8 +19,10 @@ Private stateKnown As Boolean
 Public Sub StartClock()
     On Error Resume Next
     StopClock
+    ' полное имя процедуры — чтобы не перепутать с копией дашборда в другой книге
+    tickProc = "'" & Replace(ThisWorkbook.Name, "'", "''") & "'!modApp.TickClock"
     nextTick = Now + TimeSerial(0, 1, 0)
-    Application.OnTime nextTick, "TickClock"
+    Application.OnTime nextTick, tickProc
     clockOn = True
 End Sub
 
@@ -29,12 +33,14 @@ End Sub
 
 Public Sub StopClock()
     On Error Resume Next
-    If clockOn Then Application.OnTime nextTick, "TickClock", , False
+    If clockOn Then Application.OnTime nextTick, tickProc, , False
     clockOn = False
 End Sub
 
 Public Sub TickClock()
     On Error Resume Next
+    ' «осиротевший» вызов (после сброса VBA-проекта) раньше запланированного — не множим цепочки
+    If clockOn And Now < nextTick - TimeSerial(0, 0, 5) Then Exit Sub
     clockOn = False
     RefreshClock
     StartClock
@@ -43,10 +49,24 @@ End Sub
 ' Пересчитывает надписи со временем (ячейки с именами ui_Upd*); при смене
 ' суток — всю книгу: текущая дата влияет на выбор «последнего актуального значения».
 Public Sub RefreshClock()
-    Dim nm As Name
+    Dim nm As Name, lastImp As Variant, b As Long
     On Error Resume Next
-    If lastDay <> CLng(Date) Then
+    ' «корзина» свежести данных (нет / < 1 сут / < 3 сут / старше) — цвет индикатора
+    lastImp = ThisWorkbook.Names("sys_LastImport").RefersToRange.Value
+    If IsNumeric(lastImp) And Not IsEmpty(lastImp) Then
+        If CDbl(lastImp) > 0 Then
+            If Now - CDbl(lastImp) < 1 Then
+                b = 1
+            ElseIf Now - CDbl(lastImp) < 3 Then
+                b = 2
+            Else
+                b = 3
+            End If
+        End If
+    End If
+    If lastDay <> CLng(Date) Or b <> lastBucket Then
         lastDay = CLng(Date)
+        lastBucket = b
         Application.Calculate
     Else
         For Each nm In ThisWorkbook.Names

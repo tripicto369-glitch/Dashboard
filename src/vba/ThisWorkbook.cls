@@ -23,13 +23,21 @@ End Sub
 
 ' Книга с формулами СЕГОДНЯ/ТДАТА всегда считается измененной, поэтому вопрос
 ' о сохранении задаем сами: «Отмена» оставляет книгу открытой и часы идущими.
+' При закрытии из другого макроса с DisplayAlerts = False — без вопросов.
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     On Error Resume Next
-    If Not Me.Saved And Not Me.ReadOnly Then
+    If Not Me.Saved And Application.DisplayAlerts Then
         Select Case MsgBox("Сохранить изменения в книге «" & Me.Name & "»?", _
                            vbYesNoCancel + vbQuestion, "Дашборд ЛХОС")
             Case vbYes
-                Me.Save
+                If Me.ReadOnly Then
+                    If Not Application.Dialogs(xlDialogSaveAs).Show Then
+                        Cancel = True
+                        Exit Sub
+                    End If
+                Else
+                    Me.Save
+                End If
             Case vbNo
                 Me.Saved = True
             Case Else
