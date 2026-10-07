@@ -26,15 +26,13 @@ End Sub
 ' При закрытии из другого макроса с DisplayAlerts = False — без вопросов.
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     On Error Resume Next
+    StopClock                                   ' пока имя книги в строке OnTime прежнее
     If Not Me.Saved And Application.DisplayAlerts Then
         Select Case MsgBox("Сохранить изменения в книге «" & Me.Name & "»?", _
                            vbYesNoCancel + vbQuestion, "Дашборд ЛХОС")
             Case vbYes
                 If Me.ReadOnly Then
-                    If Not Application.Dialogs(xlDialogSaveAs).Show Then
-                        Cancel = True
-                        Exit Sub
-                    End If
+                    If Not Application.Dialogs(xlDialogSaveAs).Show Then Cancel = True
                 Else
                     Me.Save
                 End If
@@ -42,8 +40,18 @@ Private Sub Workbook_BeforeClose(Cancel As Boolean)
                 Me.Saved = True
             Case Else
                 Cancel = True
-                Exit Sub
         End Select
     End If
+    If Cancel Then StartClock Else StopClock
+End Sub
+
+' «Сохранить как» меняет имя книги, входящее в строку OnTime: часы перезапускаются.
+Private Sub Workbook_BeforeSave(ByVal SaveAsUI As Boolean, Cancel As Boolean)
+    On Error Resume Next
     StopClock
+End Sub
+
+Private Sub Workbook_AfterSave(ByVal Success As Boolean)
+    On Error Resume Next
+    StartClock
 End Sub

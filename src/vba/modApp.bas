@@ -49,15 +49,17 @@ End Sub
 ' Пересчитывает надписи со временем (ячейки с именами ui_Upd*); при смене
 ' суток — всю книгу: текущая дата влияет на выбор «последнего актуального значения».
 Public Sub RefreshClock()
-    Dim nm As Name, lastImp As Variant, b As Long
+    Dim nm As Name, lastImp As Variant, age As Double, b As Long
     On Error Resume Next
-    ' «корзина» свежести данных (нет / < 1 сут / < 3 сут / старше) — цвет индикатора
-    lastImp = ThisWorkbook.Names("sys_LastImport").RefersToRange.Value
-    If IsNumeric(lastImp) And Not IsEmpty(lastImp) Then
-        If CDbl(lastImp) > 0 Then
-            If Now - CDbl(lastImp) < 1 Then
+    ' «корзина» свежести данных (нет / < 1 сут / < 3 сут / старше) — цвет индикатора.
+    ' Value2: для ячейки в формате даты .Value вернул бы Date, а IsNumeric(Date) = False
+    lastImp = ThisWorkbook.Names("sys_LastImport").RefersToRange.Value2
+    If VarType(lastImp) = vbDouble Then
+        If lastImp > 0 Then
+            age = CDbl(Now) - lastImp
+            If age < 1 Then
                 b = 1
-            ElseIf Now - CDbl(lastImp) < 3 Then
+            ElseIf age < 3 Then
                 b = 2
             Else
                 b = 3
@@ -162,6 +164,7 @@ Public Sub FitDashboard()
     If z < 40 Then w.Zoom = 40
     w.ScrollRow = 1
     w.ScrollColumn = 1
+    Application.EnableEvents = True   ' shDash.Worksheet_SelectionChange запомнит A1
     shDash.Range("A1").Select
 Done:
     Application.EnableEvents = True

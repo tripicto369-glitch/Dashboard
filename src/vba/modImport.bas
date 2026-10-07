@@ -321,14 +321,14 @@ Private Function ParseSheet(ByVal ws As Worksheet, ByRef nVals As Long) As Boole
     ' Границы таблицы — по последней заполненной ячейке столбца дат и строк заголовка
     ' (UsedRange может включать отформатированные пустые ячейки далеко за таблицей,
     ' а End(xlUp) пропускает строки, скрытые фильтром).
-    Set cell = LastCell(ws.Columns(dateCol), True)
+    Set cell = LastCell(ws.Columns(dateCol))
     If cell Is Nothing Then Exit Function
     lastRow = cell.Row
     lastCol = 0
-    Set cell = LastCell(ws.Rows(nameRow), False)
+    Set cell = LastCell(ws.Rows(nameRow))
     If Not cell Is Nothing Then lastCol = cell.MergeArea.Column + cell.MergeArea.Columns.Count - 1
     If groupRow > 0 Then
-        Set cell = LastCell(ws.Rows(groupRow), False)
+        Set cell = LastCell(ws.Rows(groupRow))
         If Not cell Is Nothing Then
             If cell.MergeArea.Column + cell.MergeArea.Columns.Count - 1 > lastCol Then
                 lastCol = cell.MergeArea.Column + cell.MergeArea.Columns.Count - 1
@@ -377,15 +377,12 @@ Private Function ParseSheet(ByVal ws As Worksheet, ByRef nVals As Long) As Boole
 End Function
 
 ' Последняя непустая ячейка строки/столбца, включая скрытые фильтром.
-Private Function LastCell(ByVal rng As Range, ByVal byRows As Boolean) As Range
+' Порядок поиска «по строкам» — как в Excel по умолчанию: Find запоминает параметры
+' в диалоге «Найти», и у пользователя они не должны меняться.
+Private Function LastCell(ByVal rng As Range) As Range
     On Error Resume Next
-    If byRows Then
-        Set LastCell = rng.Find(What:="*", LookIn:=xlFormulas, LookAt:=xlPart, _
-            SearchOrder:=xlByRows, SearchDirection:=xlPrevious)
-    Else
-        Set LastCell = rng.Find(What:="*", LookIn:=xlFormulas, LookAt:=xlPart, _
-            SearchOrder:=xlByColumns, SearchDirection:=xlPrevious)
-    End If
+    Set LastCell = rng.Find(What:="*", LookIn:=xlFormulas, LookAt:=xlPart, _
+        SearchOrder:=xlByRows, SearchDirection:=xlPrevious)
 End Function
 
 ' Итоговые и служебные столбцы рядом с данными («Среднее», «Итого» …) — не объекты.
